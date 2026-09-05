@@ -245,29 +245,49 @@ def extract_subtitle_stream(
     return out_path
 
 
+# subtitle codec used when remuxing into a given container
+_REMUX_CODEC_BY_EXT = {
+    ".mkv": "srt",
+    ".webm": "webvtt",   # matroska-in-webm only accepts webvtt text subs
+    ".mp4": "mov_text",
+    ".mov": "mov_text",
+    ".m4v": "mov_text",
+}
+
+
 def remux_with_subtitles(
     video: str,
     subtitles_srt: str,
     out_path: str,
     ffmpeg: Optional[str] = None,
+    language: str = "",
+    title: str = "",
 ) -> str:
     """Copy video + audio and attach *subtitles_srt* as the only subtitle
-    track (mkv/webm targets; other containers cannot hold SRT)."""
+    track of a new container file (mkv/webm/mp4/mov...).
+
+    No video/audio re-encoding happens (-c copy); the subtitle text is
+    re-encoded to what the container supports (srt/webvtt/mov_text).
+    """
     binary = ffmpeg or resolve_binary("ffmpeg")
     ext = os.path.splitext(out_path)[1].lower()
-    if ext not in (".mkv", ".webm"):
+    codec = _REMUX_CODEC_BY_EXT.get(ext)
+    if codec is None:
         raise ToolError(
-            f"cannot remux SRT subtitles into a .{ext or '?'} container — "
-            "use an .mkv or .webm output"
+            f"cannot remux subtitles into a .{ext or '?'} container — use "
+            ".mkv, .webm, .mp4 or .mov output"
         )
-    run_tool(
-        [
-            binary, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
-            "-i", video,
-            "-i", subtitles_srt,
-            "-map", "0:v:0", "-map", "0:a?", "-map", "1:0",
-            "-c:v", "copy", "-c:a", "copy", "-c:s", "srt",
-            out_path,
-        ]
-    )
+    cmd = [
+        binary, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+        "-i", video,
+        "-i", subtitles_srt,
+        "-map", "0:v:0", "-map", "0:a?", "-map", "1:0",
+        "-c:v", "copy", "-c:a", "copy", "-c:s", codec,
+    ]
+    if language:
+        cmd += ["-metadata:s:s:0", f"language={language}"]
+    if title:
+        cmd += ["-metadata:s:s:0", f"title={title}"]
+    cmd.append(out_path)
+    run_tool(cmd)
     return out_path

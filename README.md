@@ -62,6 +62,7 @@ segment/cue pairs) is reported too — positive means the subtitles run late.
 ```bash
 python -m venv .venv && . .venv/bin/activate
 pip install -e .            # or: pip install -r requirements.txt
+pip install -e ".[autosub]"   # extra: OpenSubtitles access for `autosub`
 ```
 
 `ffmpeg`/`ffprobe` must be on `PATH` (or point at a static build — used in
@@ -223,6 +224,52 @@ Notes:
   confident ranking.
 * unreadable/empty SRTs are reported as errors and skipped; the remaining
   files are still ranked (exit code 1 when every file failed).
+
+### End-to-end: `subcheck autosub`
+
+One command for the whole pipeline — fetch candidates from OpenSubtitles,
+verify them against the video's own audio, fix the best one, embed it:
+
+```bash
+subcheck autosub movie.mkv                    # full auto, then muxes the winner
+subcheck autosub movie.mkv --limit 10 --no-embed --json report.json
+subcheck autosub show.mkv --language en --refresh   # ignore caches (redo pulls)
+```
+
+How it works:
+
+1. **Fetch** — the title/season/episode are derived from the file name
+   (`Steven.Universe.S01E23....mkv` → query `Steven Universe` S01E23; override
+   with `--title/--season/--episode`). Credentials come from `.env`
+   (`OPENSUBTITLES_API_KEY/_USERNAME/_PASSWORD`, see `.env.example`) or
+   `~/.config/opensubtitlescom/config.json`. Searches and downloads are
+   cached under `.cache/opensubtitles/` — a cache hit costs **0** of the
+   20-downloads/day quota. `--refresh` bypasses both caches (use it when a
+   previous pull gave bad subs), and a corrupt cached file is purged and
+   re-downloaded automatically.
+2. **Verify** — the `--limit` candidates (default 10) are scored against the
+   video with one ASR pass over the same sampled windows (the compare
+   engine): per-candidate composite, text accuracy and drift diagnosis.
+3. **Pick** — when the diagnosis says a candidate is fixable (consistent
+   drift / bad fps), `autosub` *applies the fix and re-scores it on the same
+   windows* before deciding; on top of that it scans constant shifts from
+   −8 s to +8 s and keeps whichever version verifiably scores best (so a
+   "common shift" rescue works even when the classifier is unsure). The
+   winning candidate is written as `<video>.autosub.srt` with the fix baked
+   in.
+4. **Embed** — the corrected track is muxed into a *copy* of the video
+   (`<video>.autosub.mkv`, lossless `-c copy` video/audio; mkv/webm/mp4/mov
+   supported). Skipped with `--no-embed`; not possible for remote files or
+   unsupported containers — the `.srt` is still written.
+
+Requires the `opensubtitlescom` package for live searches/downloads
+(`pip install -e ".[autosub]"`); all cache/verification logic works offline.
+
+Validated end-to-end on a Blu-ray MKV with a cached HDTV-release subtitle
+(the two-tier cache means 0 API quota used): the candidate scored 7.5 % as-is,
+the shift scan found +4.00 s (matching the manual ~+3.9 s diagnosis), the fix
+was verified on the same windows (44.1 % — remaining gap is music/interjection
+windows), and the corrected track was muxed into `<video>.autosub.mkv`.
 
 ### Embedded subtitles (mkv / mp4 …)
 

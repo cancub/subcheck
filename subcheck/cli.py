@@ -41,6 +41,8 @@ def build_parser() -> argparse.ArgumentParser:
             "and compare text (WER) and timing (IoU) against the subtitle file.\n"
             "\n"
             "Other commands:\n"
+            "  subcheck autosub movie.mkv\n"
+            "      fetch, verify, fix + embed subtitles (see --help)\n"
             "  subcheck streams movie.mkv\n"
             "      list the embedded subtitle streams of a video\n"
             "  subcheck compare movie.mp4 a.srt b.srt c.srt\n"
@@ -317,25 +319,10 @@ def build_shift_parser() -> argparse.ArgumentParser:
 
 def _transform_srt(path: str, out: str, by: float, scale: float) -> int:
     """Rewrite every cue of *path* with new_t = t*scale + by; returns the
-    number of clamped cues."""
-    import pysrt
+    number of clamped cues (delegates to srtio.shift_srt)."""
+    from .srtio import shift_srt
 
-    subs = pysrt.open(path, encoding="utf-8-sig")
-    clamped = 0
-    by_ms = by * 1000.0
-    for item in subs:
-        start_ms = int(round(item.start.ordinal * scale + by_ms))
-        end_ms = int(round(item.end.ordinal * scale + by_ms))
-        if start_ms < 0:
-            start_ms = 0
-            clamped += 1
-        if end_ms <= start_ms:
-            end_ms = start_ms + 1
-            clamped += 1
-        item.start = pysrt.SubRipTime(milliseconds=start_ms)
-        item.end = pysrt.SubRipTime(milliseconds=end_ms)
-    subs.save(out, encoding="utf-8")
-    return clamped
+    return shift_srt(path, out, by=by, scale=scale)
 
 
 def _default_fixed_path(target: str) -> str:
@@ -428,6 +415,164 @@ def run_rescore(args) -> CheckReport:
     )
 
 
+def build_autosub_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="subcheck autosub",
+        description=(
+            "End-to-end: fetch subtitle candidates for a video from "
+            "OpenSubtitles (cached), verify each against the video's own audio "
+            "with the compare engine, pick the best fit — trying its diagnosed "
+            "drift/timebase fix first — and embed it into a copy of the video.\n"
+            "\n"
+            "Usage: subcheck autosub movie.mkv [--limit 10] [--no-embed]\n"
+            "       subcheck autosub show.mkv --language en --refresh\n"
+            "\n"
+            "Credentials come from .env (OPENSUBTITLES_API_KEY/_USERNAME/"
+            "_PASSWORD) or ~/.config/opensubtitlescom/config.json. Searches "
+            "and downloads are cached under .cache/opensubtitles (0 quota on "
+            "hits); --refresh ignores both caches, and a corrupt cached file "
+            "is purged and re-downloaded automatically."
+        ),
+        formatter_class=_RawDefaultsHelpFormatter,
+    )
+    p.add_argument("video", help="video file to find subtitles for")
+    p.add_argument("--limit", type=int, default=10,
+                   help="how many candidates to fetch and compare (downloads "
+                        "only count against the quota when not cached)")
+    p.add_argument("--language", default="en", metavar="CODE",
+                   help="subtitle language code to search for")
+    p.add_argument("--refresh", action="store_true",
+                   help="ignore cached search results and cached files "
+                        "(re-query/re-download; use when a previous pull "
+                        "didn't work)")
+    p.add_argument("--title", default=None,
+                   help="override the title derived from the file name")
+    p.add_argument("--season", type=int, default=None, metavar="N",
+                   help="override the season (episode search)")
+    p.add_argument("--episode", type=int, default=None, metavar="N",
+                   help="override the episode number")
+    p.add_argument("--no-embed", action="store_true",
+                   help="do not remux the winning subtitles into the video")
+    p.add_argument("--embed-out", default=None, metavar="PATH",
+                   help="output video path for the embedded copy "
+                        "(default: <video>.autosub.<ext> next to the source)")
+    p.add_argument("--out-srt", default=None, metavar="PATH",
+                   help="where to write the winning .srt "
+                        "(default: <video>.autosub.srt next to the source)")
+    p.add_argument("--snippets", type=int, default=3,
+                   help="number of random windows to verify with")
+    p.add_argument("--duration", type=float, default=10.0,
+                   help="window duration in seconds")
+    p.add_argument("--min-gap", type=float, default=30.0,
+                   help="minimum spacing between windows (seconds)")
+    p.add_argument("--seed", type=int, default=None,
+                   help="random seed for reproducible window selection")
+    p.add_argument("--model", default="large-v3",
+                   help="whisper model (tiny/base/small/medium/large-v3 or an HF repo id)")
+    p.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto",
+                   help="compute device; auto = CUDA when available, else CPU")
+    p.add_argument("--compute-type", default=None,
+                   help="ctranslate2 compute type (default: float16 on CUDA, int8 on CPU)")
+    p.add_argument("--model-dir", default=None,
+                   help="directory for model weights (default: HF cache / SUBCHECK_MODEL_DIR)")
+    p.add_argument("--beam-size", type=int, default=5, help="whisper beam size")
+    p.add_argument("--no-expand-numbers", action="store_true",
+                   help="do not expand numerals to words before comparing")
+    p.add_argument("--workdir", default=None,
+                   help="keep fetched candidates / wavs / fixed copies here "
+                        "(default: ephemeral temp dir)")
+    p.add_argument("--json", metavar="FILE", default=None,
+                   help="also write the full machine-readable report to FILE")
+    return p
+
+
+def run_autosub_cli(args) -> "AutoSubResult":
+    from .autosub import run_autosub
+
+    return run_autosub(
+        args.video,
+        language=args.language,
+        limit=args.limit,
+        refresh=args.refresh,
+        title=args.title,
+        season=args.season,
+        episode=args.episode,
+        snippets=args.snippets,
+        duration=args.duration,
+        min_gap=args.min_gap,
+        seed=args.seed,
+        model=args.model,
+        device=args.device,
+        compute_type=args.compute_type,
+        download_root=args.model_dir,
+        beam_size=args.beam_size,
+        embed=not args.no_embed,
+        embed_out=args.embed_out,
+        final_srt=args.out_srt,
+        workdir=args.workdir,
+        expand_numbers=not args.no_expand_numbers,
+    )
+
+
+def print_autosub_report(result) -> None:
+    print(f"subcheck {__version__}  —  autosub (fetch / verify / fix / embed)")
+    print("-" * 74)
+    meta = result.meta
+    label = f"{meta.get('title')}"
+    if meta.get("season") is not None:
+        label += f" S{meta['season']:02d}E{meta['episode']:02d}"
+    print(f"video          : {result.video}")
+    print(f"searching      : {label}  [{result.language}]  "
+          f"({len(result.candidates)} candidate(s), "
+          f"{result.windows_count} shared window(s))")
+    print("-" * 74)
+    if result.error:
+        print(f"error          : {result.error}")
+        for note in result.notes:
+            print(f"* {note}")
+        return
+    if result.candidates:
+        print(f"{'rank':>4}  {'release':<40} {'cached':>6} {'before':>8} "
+              f"{'mode':<9} {'after':>8}")
+        print("-" * 74)
+        ranked = sorted((c for c in result.candidates if not c.error),
+                        key=lambda c: (c.rank if c.rank is not None else 99))
+        for c in ranked:
+            name = (c.release or c.file_name) or f"file {c.file_id}"
+            if len(name) > 40:
+                name = name[:37] + "..."
+            rank = "-" if c.rank is None else f"#{c.rank}"
+            cached = "yes" if c.from_cache else "no"
+            before = _fmt_pct(c.composite)
+            after = _fmt_pct(c.composite_after)
+            mode = c.best_mode
+            if c.best_mode != "as-is" and c.best_by:
+                mode += f" {c.best_by:+.2f}s"
+            print(f"{rank:>4}  {name:<40} {cached:>6} {before:>8} "
+                  f"{mode:<9} {after:>8}")
+        for c in result.candidates:
+            if c.error:
+                print(f"  -   {c.file_name or c.file_id}: {c.error}")
+    print("-" * 74)
+    for note in result.notes:
+        print(f"* {note}")
+    chosen = result.chosen
+    if chosen is not None:
+        name = (chosen.release or chosen.file_name) or f"file {chosen.file_id}"
+        print(f"best match     : {name}  "
+              f"(composite {chosen.composite_after:.1f}%)")
+        if chosen.best_mode != "as-is":
+            verb = "shifted" if chosen.best_mode == "shift" else "rescaled"
+            print(f"  (would only score {chosen.composite:.1f}% as-is — "
+                  f"{verb} by {chosen.best_by:+.3f}s "
+                  f"scale={chosen.best_scale:g}, verified on the same windows)")
+        print(f"wrote         : {result.final_srt}")
+        if result.embed_status == "ok":
+            print(f"embedded      : {result.embed_out}")
+        else:
+            print(f"embedding     : {result.embed_status}")
+
+
 def build_streams_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="subcheck streams",
@@ -464,6 +609,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "check":  # `subcheck check VIDEO [SRT]` is the default
         argv = argv[1:]
+    if argv and argv[0] == "autosub":
+        args = build_autosub_parser().parse_args(argv[1:])
+        try:
+            result = run_autosub_cli(args)
+        except Exception as exc:  # noqa: BLE001 - creds/network/etc.
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print_autosub_report(result)
+        if args.json:
+            with open(args.json, "w", encoding="utf-8") as fh:
+                json.dump(result.to_dict(), fh, indent=2, ensure_ascii=False)
+            print(f"\nJSON report written to {args.json}")
+        return 1 if result.error else 0
     if argv and argv[0] == "streams":
         args = build_streams_parser().parse_args(argv[1:])
         try:

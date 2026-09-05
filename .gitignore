@@ -7,3 +7,7 @@ dist/
 .pytest_cache/
 snippets/
 *.wav
+.env
+.env.*
+!.env.example
+.cache/

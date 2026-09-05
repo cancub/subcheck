@@ -81,3 +81,27 @@ def cues_overlapping(cues: List[Cue], wstart: float, wend: float) -> List[Cue]:
             break  # sorted by start: nothing after can overlap either
         out.append(cue)
     return out
+
+
+def shift_srt(src: str, out: str, by: float = 0.0, scale: float = 1.0) -> int:
+    """Rewrite every cue of *src* with ``new_t = t*scale + by`` (pysrt-based,
+    preserves text/formatting). Returns how many cue times had to be clamped
+    (negative results / zero-length cues)."""
+    import pysrt
+
+    subs = pysrt.open(src, encoding="utf-8-sig")
+    clamped = 0
+    by_ms = by * 1000.0
+    for item in subs:
+        start_ms = int(round(item.start.ordinal * scale + by_ms))
+        end_ms = int(round(item.end.ordinal * scale + by_ms))
+        if start_ms < 0:
+            start_ms = 0
+            clamped += 1
+        if end_ms <= start_ms:
+            end_ms = start_ms + 1
+            clamped += 1
+        item.start = pysrt.SubRipTime(milliseconds=start_ms)
+        item.end = pysrt.SubRipTime(milliseconds=end_ms)
+    subs.save(out, encoding="utf-8")
+    return clamped

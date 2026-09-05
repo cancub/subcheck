@@ -195,3 +195,11 @@ def test_tiny_segment_matches_on_all_its_words():
     segs = [_seg(100.0, 101.5, "give month")]
     assert pair_deltas(segs, [_cue(1, 101.0, 103.0, "give month please")]) == [1.0]
     assert pair_deltas(segs, [_cue(1, 101.0, 103.0, "give nothing")]) == []
+
+
+def test_single_word_segments_never_pair():
+    # one shared interjection ("oh") must not count as a timing match
+    segs = [_seg(100.0, 102.0, "oh")]
+    assert pair_deltas(segs, [_cue(1, 101.0, 104.0, "oh man what happening")]) == []
+    segs2 = [_seg(100.0, 102.0, "right yes")]
+    assert pair_deltas(segs2, [_cue(1, 101.0, 104.0, "right yes")]) == [1.0]

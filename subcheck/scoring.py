@@ -315,11 +315,16 @@ def pair_deltas(segments: List[Segment], cues: List[Cue]) -> List[float]:
 def _match_pairs(segments: List[Segment], cues: List[Cue]) -> List[Tuple[float, float]]:
     """Pair each segment with the nearby cue whose text matches best.
 
-    A pair is only kept when the two sides share at least two words (or all
-    words of a very short segment) — one shared filler word like "the" is not
-    enough to claim the subtitle line corresponds to that speech.
+    A pair is only kept when both sides share at least two words — one shared
+    filler/interjection word like "the" or "oh" is not enough to claim the
+    subtitle line corresponds to that speech (single-word segments are
+    therefore skipped entirely; they add noise, not timing signal).
     """
-    seg_words = [(s, set(normalize(s.text).split())) for s in segments if normalize(s.text)]
+    seg_words = []
+    for s in segments:
+        words = normalize(s.text).split()
+        if len(words) >= 2:
+            seg_words.append((s, set(words)))
     cue_words = [(c, set(normalize(c.text).split())) for c in cues if normalize(c.text)]
     pairs: List[Tuple[float, float]] = []
     used_cues = set()
@@ -336,11 +341,9 @@ def _match_pairs(segments: List[Segment], cues: List[Cue]) -> List[Tuple[float, 
             if common > best_overlap_words:
                 best_overlap_words = common
                 best_cue = cue
-        if best_cue is not None:
-            needed = min(2, len(sw))  # tiny segments must match entirely
-            if best_overlap_words >= needed:
-                used_cues.add(id(best_cue))
-                pairs.append((seg.start, best_cue.start))
+        if best_cue is not None and best_overlap_words >= 2:
+            used_cues.add(id(best_cue))
+            pairs.append((seg.start, best_cue.start))
     return pairs
 
 

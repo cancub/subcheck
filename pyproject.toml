@@ -20,6 +20,8 @@ dependencies = [
 # On a machine with an NVIDIA GPU, install CUDA-enabled ctranslate2 wheels:
 #   pip install "faster-whisper[cuda]"
 cuda = ["faster-whisper[cuda]>=1.0.0"]
+# OpenSubtitles access for `subcheck autosub`
+autosub = ["opensubtitlescom"]
 dev = ["pytest>=7.0"]
 
 [project.scripts]
