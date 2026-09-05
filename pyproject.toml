@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "subcheck"
+version = "0.1.0"
+description = "Checks whether a subtitle file (SRT) is accurate for a given video, by sampling random snippets and comparing faster-whisper ASR transcripts against the subtitles (WER + temporal IoU)."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = [
+    "faster-whisper>=1.0.0",
+    "pysrt>=1.1.1",
+    "jiwer>=3.0.0",
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+# On a machine with an NVIDIA GPU, install CUDA-enabled ctranslate2 wheels:
+#   pip install "faster-whisper[cuda]"
+cuda = ["faster-whisper[cuda]>=1.0.0"]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+subcheck = "subcheck.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["subcheck*"]
