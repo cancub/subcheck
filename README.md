@@ -159,6 +159,40 @@ speech, which covers timebase errors up to ~0.1–0.15 % across a 2 h movie
 still match; the rest will be flagged as uncaptioned/erratic, so run such a
 file with extra early windows to characterise the slope.
 
+### Fixing subtitles — `subcheck shift` and its two options
+
+`subcheck shift` rewrites every cue time with one general transform:
+
+```
+new_t = t × --scale + --by          (defaults: --scale 1.0, --by 0.0)
+```
+
+The two options fix the two *different* timing defects the check can find:
+
+| Option | What it does | Fixes | Example |
+|---|---|---|---|
+| `--by SECONDS` | **constant shift**: add the same amount to every cue time (negative = earlier, positive = later) | *consistent drift* — every line is off by the same offset, e.g. all cues 0.99 s late | `--by -0.989` |
+| `--scale FACTOR` | **timebase (fps) scaling**: multiply every cue time by a factor | *bad fps* — the subtitle timeline runs at the wrong speed, so drift grows over time | `--scale 0.999255` |
+
+Why the scale factor exists: when subtitles are timed for a version of the
+movie that runs at a different frame rate, their cue times are wrong by a
+*ratio*, not by a constant. For example, subtitles timed for a PAL 25 fps
+transfer need `--scale 0.95904` (= 23.976 ÷ 25) to play correctly against a
+23.976 fps movie — every cue moves ~4.1 % earlier, so the correction grows
+with the cue's position in the film. A `bad fps` classification reports the
+fitted values directly and prints the ready-made command:
+
+```bash
+subcheck shift "movie.srt" --scale 0.999255 --by -1.192
+# new_t = t × 0.999255 + (-1.192)     timeline was ~0.07 % fast and ~1.2 s late
+```
+
+The two options combine in one command (scale is applied first, then the
+shift) and each defaults to a no-op, so either can be used alone. Output
+defaults to `<name>.fixed.srt` next to the input (`--out PATH` to choose);
+cue times that would become negative are clamped to zero. Verify the fix by
+re-scoring the result (below).
+
 ### Other subcommands
 
 * `subcheck rescore windows.json other.srt` — re-score previously

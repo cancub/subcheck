@@ -25,18 +25,31 @@ def _fmt_pct(value: Optional[float]) -> str:
     return "    -  " if value is None else f"{value:6.1f}%"
 
 
+class _RawDefaultsHelpFormatter(
+    argparse.RawDescriptionHelpFormatter, argparse.ArgumentDefaultsHelpFormatter
+):
+    """Keep multi-line descriptions readable and still show option defaults."""
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="subcheck",
         description=(
-            "Check whether a subtitle (SRT) file is accurate for a video: sample "
-            "random short windows, transcribe them with faster-whisper and compare "
-            "text (WER) and timing (IoU) against the subtitle file.\n\n"
+            "Check whether a subtitle (SRT) file is accurate for a video:\n"
+            "sample random short windows, transcribe them with faster-whisper\n"
+            "and compare text (WER) and timing (IoU) against the subtitle file.\n"
+            "\n"
             "Other commands:\n"
-            "  subcheck rescore windows.json other.srt   re-score saved windows\n"
-            "  subcheck shift movie.srt --by SECONDS     constant time shift (fix)"
+            "  subcheck rescore windows.json other.srt\n"
+            "      re-score saved windows against another SRT\n"
+            "  subcheck shift movie.srt --by -0.989\n"
+            "      fix 'consistent drift' (constant time shift)\n"
+            "  subcheck shift movie.srt --scale 0.95904\n"
+            "      fix 'bad fps' (timebase/fps correction)\n"
+            "  subcheck shift movie.srt --scale F --by B\n"
+            "      combine both (see 'subcheck shift --help')"
         ),
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        formatter_class=_RawDefaultsHelpFormatter,
     )
     p.add_argument("--version", action="version", version=f"subcheck {__version__}")
     p.add_argument("media", help="video file path or URL (ffmpeg/ffprobe readable)")
@@ -90,20 +103,36 @@ def build_shift_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="subcheck shift",
         description=(
-            "Transform every cue time of an SRT file by a constant shift and/or "
-            "a time-scale factor (the fix suggested for 'consistent drift' and "
-            "'bad fps' results):  new_t = t * --scale + --by.\n"
-            "Positive --by moves cues later, negative moves them earlier; "
-            "--scale < 1 slows the subtitle timeline down (e.g. 0.9600 for "
-            "25 fps PAL subtitles played at 23.976 fps)."
+            "Rewrite every cue time of an SRT file with one transform:\n"
+            "    new_t = t * --scale + --by      (defaults: 1.0, 0.0)\n"
+            "\n"
+            "The two options mirror the two timing defects the check detects:\n"
+            "\n"
+            "  --by     constant SHIFT: add the same amount to all cue times.\n"
+            "           Fix for 'consistent drift' (every line late or early by\n"
+            "           the same offset), e.g. --by -0.989 for cues 0.99 s late.\n"
+            "\n"
+            "  --scale  time-BASE (fps) correction: multiply all cue times by a\n"
+            "           factor. Fix for 'bad fps' (the subtitle timeline runs at\n"
+            "           the wrong speed, so drift grows over time). Example:\n"
+            "           PAL 25 fps subtitles on a 23.976 fps movie need\n"
+            "           --scale 0.95904 (= 23.976 / 25).\n"
+            "\n"
+            "The options combine (scale first, then shift); each defaults to a\n"
+            "no-op, so either can be used alone. Negative times are clamped to\n"
+            "0. Output defaults to <name>.fixed.srt (use --out to override)."
         ),
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        formatter_class=_RawDefaultsHelpFormatter,
     )
     p.add_argument("subtitle", help="SRT file to fix")
     p.add_argument("--by", type=float, default=0.0,
-                   help="seconds to add to every cue time (can be negative)")
+                   help="constant time shift in seconds, added to every cue time "
+                        "(negative = earlier, positive = later; fix for consistent "
+                        "drift)")
     p.add_argument("--scale", type=float, default=1.0,
-                   help="multiply every cue time by this factor (timebase fix)")
+                   help="timebase (fps) factor, multiplied into every cue time "
+                        "(1.0 = unchanged; <1 slows the subtitle timeline down, "
+                        ">1 speeds it up; fix for bad-fps drift)")
     p.add_argument("--out", default=None,
                    help="output path (default: <name>.fixed.srt next to the input)")
     return p
@@ -148,7 +177,7 @@ def build_rescore_parser() -> argparse.ArgumentParser:
             "re-running ffmpeg or the ASR model. Useful to compare subtitle "
             "candidates for the same video."
         ),
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        formatter_class=_RawDefaultsHelpFormatter,
     )
     p.add_argument("windows_json", help="report JSON from 'subcheck check --json'")
     p.add_argument("subtitle", help="SRT file to score")
