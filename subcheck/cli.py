@@ -41,6 +41,8 @@ def build_parser() -> argparse.ArgumentParser:
             "and compare text (WER) and timing (IoU) against the subtitle file.\n"
             "\n"
             "Other commands:\n"
+            "  subcheck streams movie.mkv\n"
+            "      list the embedded subtitle streams of a video\n"
             "  subcheck compare movie.mp4 a.srt b.srt c.srt\n"
             "      compare subtitle files on the same windows (see --help)\n"
             "  subcheck rescore windows.json other.srt\n"
@@ -59,9 +61,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "subtitle",
         nargs="?",
-        help="SRT file to check; omit to let it be auto-detected next to the media",
+        help="SRT file to check; omit to auto-detect — a sidecar .srt next to "
+             "the media, or an embedded subtitle stream of the video",
     )
     _add_run_options(p, rerolls=True)
+    p.add_argument("--embedded", action="store_true",
+                   help="use an embedded subtitle stream of the video even when "
+                        "a sidecar .srt exists")
+    p.add_argument("--sub-stream", type=int, default=None, metavar="INDEX",
+                   help="which embedded subtitle stream to use (see "
+                        "'subcheck streams <video>')")
+    p.add_argument("--sub-language", default=None, metavar="CODE",
+                   help="pick the embedded stream by language code (eng, fre, ...)")
     return p
 def _add_run_options(p: argparse.ArgumentParser, rerolls: bool = True) -> None:
     """The knobs shared by `check` and `compare`."""
@@ -94,16 +105,6 @@ def _add_run_options(p: argparse.ArgumentParser, rerolls: bool = True) -> None:
                    help="keep extracted WAV snippets in this directory (default: temp)")
     p.add_argument("--json", metavar="FILE", default=None,
                    help="also write the full machine-readable report to FILE")
-
-
-def auto_subtitle(media: str) -> Optional[str]:
-    """Find an .srt with a matching base name next to the media."""
-    import glob
-    import os
-
-    base = os.path.splitext(media)[0]
-    hits = sorted(glob.glob(base + "*.srt")) + sorted(glob.glob(base + ".*.srt"))
-    return hits[0] if hits else None
 
 
 def build_compare_parser() -> argparse.ArgumentParser:
@@ -257,7 +258,8 @@ def build_shift_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="subcheck shift",
         description=(
-            "Rewrite every cue time of an SRT file with one transform:\n"
+            "Rewrite every cue time of an SRT file (or of the subtitles embedded\n"
+            "in a video) with one transform:\n"
             "    new_t = t * --scale + --by      (defaults: 1.0, 0.0)\n"
             "\n"
             "The two options mirror the two timing defects the check detects:\n"
@@ -272,13 +274,25 @@ def build_shift_parser() -> argparse.ArgumentParser:
             "           PAL 25 fps subtitles on a 23.976 fps movie need\n"
             "           --scale 0.95904 (= 23.976 / 25).\n"
             "\n"
+            "If the input is not an .srt file, it is treated as a video and its\n"
+            "embedded subtitle stream is used instead (--sub-stream /\n"
+            "--sub-language pick the track; run 'subcheck streams <video>' to\n"
+            "list them). The fixed SRT is written next to the input; with\n"
+            "--remux OUT.mkv the corrected track is also muxed back into a copy\n"
+            "of the video.\n"
+            "\n"
             "The options combine (scale first, then shift); each defaults to a\n"
             "no-op, so either can be used alone. Negative times are clamped to\n"
             "0. Output defaults to <name>.fixed.srt (use --out to override)."
         ),
         formatter_class=_RawDefaultsHelpFormatter,
     )
-    p.add_argument("subtitle", help="SRT file to fix")
+    p.add_argument(
+        "subtitle",
+        metavar="SRT_OR_VIDEO",
+        help=".srt file to fix, or a video file whose embedded subtitles "
+             "should be fixed",
+    )
     p.add_argument("--by", type=float, default=0.0,
                    help="constant time shift in seconds, added to every cue time "
                         "(negative = earlier, positive = later; fix for consistent "
@@ -287,29 +301,31 @@ def build_shift_parser() -> argparse.ArgumentParser:
                    help="timebase (fps) factor, multiplied into every cue time "
                         "(1.0 = unchanged; <1 slows the subtitle timeline down, "
                         ">1 speeds it up; fix for bad-fps drift)")
+    p.add_argument("--sub-stream", type=int, default=None, metavar="INDEX",
+                   help="embedded stream index to fix (default: default/first "
+                        "text stream)")
+    p.add_argument("--sub-language", default=None, metavar="CODE",
+                   help="pick the embedded stream by language code (eng, fre, ...)")
+    p.add_argument("--remux", default=None, metavar="OUT.mkv",
+                   help="when fixing a video, also mux the corrected subtitles "
+                        "into a copy of the video (mkv/webm)")
     p.add_argument("--out", default=None,
-                   help="output path (default: <name>.fixed.srt next to the input)")
+                   help="output SRT path (default: <name>.fixed.srt next to the "
+                        "input)")
     return p
 
 
-def run_shift(args) -> tuple:
-    """Apply a constant time shift (+ optional timebase scale); returns
-    (output path, clamped count)."""
-    import os
-
+def _transform_srt(path: str, out: str, by: float, scale: float) -> int:
+    """Rewrite every cue of *path* with new_t = t*scale + by; returns the
+    number of clamped cues."""
     import pysrt
 
-    path = args.subtitle
-    out = args.out
-    if out is None:
-        root, ext = os.path.splitext(path)
-        out = root + ".fixed" + (ext or ".srt")
     subs = pysrt.open(path, encoding="utf-8-sig")
     clamped = 0
-    by_ms = args.by * 1000.0
+    by_ms = by * 1000.0
     for item in subs:
-        start_ms = int(round(item.start.ordinal * args.scale + by_ms))
-        end_ms = int(round(item.end.ordinal * args.scale + by_ms))
+        start_ms = int(round(item.start.ordinal * scale + by_ms))
+        end_ms = int(round(item.end.ordinal * scale + by_ms))
         if start_ms < 0:
             start_ms = 0
             clamped += 1
@@ -319,7 +335,67 @@ def run_shift(args) -> tuple:
         item.start = pysrt.SubRipTime(milliseconds=start_ms)
         item.end = pysrt.SubRipTime(milliseconds=end_ms)
     subs.save(out, encoding="utf-8")
-    return out, clamped
+    return clamped
+
+
+def _default_fixed_path(target: str) -> str:
+    stem = os.path.splitext(os.path.basename(target.split("?")[0]))[0]
+    base = os.path.dirname(target)
+    if not base or base.startswith(("http://", "https://")):
+        base = "."
+    return os.path.join(base, stem + ".fixed.srt")
+
+
+def run_shift(args) -> dict:
+    """Apply the transform; returns {out, clamped, note} — *note* describes
+    the embedded stream when the input was a video."""
+    import shutil
+    import tempfile
+
+    import pysrt  # noqa: F401  (validates the file below)
+
+    target = args.subtitle
+    out = args.out
+    if out is None:
+        out = _default_fixed_path(target)
+
+    if target.lower().endswith(".srt"):
+        return {"out": out, "clamped": _transform_srt(target, out, args.by, args.scale),
+                "note": ""}
+
+    # not an .srt: treat it as a video with embedded subtitles
+    from .embedded import (
+        choose_subtitle_stream,
+        extract_subtitle_stream,
+        probe_subtitle_streams,
+        remux_with_subtitles,
+    )
+
+    streams = probe_subtitle_streams(target)
+    if not streams:
+        raise ValueError(
+            f"{target!r} is not an .srt file and contains no embedded subtitle "
+            "streams — nothing to shift"
+        )
+    stream = choose_subtitle_stream(
+        streams, index=args.sub_stream, language=args.sub_language
+    )
+    tmpdir = tempfile.mkdtemp(prefix="subcheck-embed-")
+    try:
+        raw = os.path.join(tmpdir, "embedded.srt")
+        extract_subtitle_stream(target, stream, raw)
+        clamped = _transform_srt(raw, out, args.by, args.scale)
+        text_n = sum(1 for s in streams if s.text_capable)
+        note = f"using embedded {stream.desc}"
+        if text_n > 1:
+            note += (f" ({text_n} text streams available — use --sub-stream or "
+                     "--sub-language to pick another)")
+        if args.remux:
+            remux_with_subtitles(target, out, args.remux)
+            note += f"; remuxed into {args.remux}"
+        return {"out": out, "clamped": clamped, "note": note}
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def build_rescore_parser() -> argparse.ArgumentParser:
@@ -352,8 +428,49 @@ def run_rescore(args) -> CheckReport:
     )
 
 
+def build_streams_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="subcheck streams",
+        description=(
+            "List the embedded subtitle streams of a video file, so you can "
+            "pick one with --sub-stream / --sub-language for 'subcheck check' "
+            "or 'subcheck shift'."
+        ),
+        formatter_class=_RawDefaultsHelpFormatter,
+    )
+    p.add_argument("media", help="video file path or URL")
+    return p
+
+
+def run_streams(args) -> int:
+    from .embedded import probe_subtitle_streams
+
+    streams = probe_subtitle_streams(args.media)
+    if not streams:
+        print(f"{args.media}: no embedded subtitle streams found.")
+        return 0
+    print(f"{args.media}: {len(streams)} embedded subtitle stream(s):")
+    for st in streams:
+        tag = ""
+        if not st.text_capable:
+            tag = "  [bitmap — cannot be checked textually]"
+        print(f"  #{st.index:<3} {st.codec:<22} lang={st.language or '-':<4}"
+              f" default={'yes' if st.default else 'no':<3}"
+              f" forced={'yes' if st.forced else 'no'}{tag}")
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "check":  # `subcheck check VIDEO [SRT]` is the default
+        argv = argv[1:]
+    if argv and argv[0] == "streams":
+        args = build_streams_parser().parse_args(argv[1:])
+        try:
+            return run_streams(args)
+        except Exception as exc:  # noqa: BLE001
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
     if argv and argv[0] == "compare":
         args = build_compare_parser().parse_args(argv[1:])
         try:
@@ -370,14 +487,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     if argv and argv[0] == "shift":
         args = build_shift_parser().parse_args(argv[1:])
         try:
-            out, clamped = run_shift(args)
+            result = run_shift(args)
         except Exception as exc:  # noqa: BLE001 - surface pysrt/IO errors
             print(f"error: {exc}", file=sys.stderr)
             return 1
-        print(f"shifted {args.subtitle} by {args.by:+.3f}s "
+        target = args.subtitle
+        print(f"shifted {target} by {args.by:+.3f}s "
               f"(scale {args.scale:g}) "
-              f"({clamped} cue time(s) clamped to stay valid)")
-        print(f"wrote {out}")
+              f"({result['clamped']} cue time(s) clamped to stay valid)")
+        if result["note"]:
+            print(f"({result['note']})")
+        print(f"wrote {result['out']}")
         return 0
     if argv and argv[0] == "rescore":
         args = build_rescore_parser().parse_args(argv[1:])
@@ -394,19 +514,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
 
     args = build_parser().parse_args(argv)
-    subtitle = args.subtitle
-    if subtitle is None:
-        subtitle = auto_subtitle(args.media)
-        if subtitle is None:
-            print(
-                "error: no subtitle file given and none found next to the media",
-                file=sys.stderr,
-            )
-            return 2
 
     opts = Options(
         media=args.media,
-        subtitle=subtitle,
+        subtitle=args.subtitle,  # None -> sidecar .srt or embedded stream
         snippets=args.snippets,
         duration=args.duration,
         min_gap=args.min_gap,
@@ -420,6 +531,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         max_rerolls=args.max_rerolls,
         workdir=args.workdir,
         expand_numbers=not args.no_expand_numbers,
+        use_embedded=args.embedded,
+        sub_stream=args.sub_stream,
+        sub_language=args.sub_language,
     )
 
     try:
@@ -440,7 +554,20 @@ def print_report(report: CheckReport) -> None:
     print(f"subcheck {__version__}  —  subtitle accuracy check")
     print("-" * 74)
     print(f"media          : {report.media}")
-    print(f"subtitles      : {report.subtitle}")
+    sub_label = report.settings.get("subtitle_label") or report.subtitle
+    print(f"subtitles      : {sub_label}")
+    if report.settings.get("source") == "embedded":
+        f = report.settings.get("subtitle_file")
+        if f and os.path.exists(f):
+            print(f"                (extracted from the video: {f})")
+        total = report.settings.get("embedded_streams_total")
+        text_n = report.settings.get("embedded_text_streams")
+        used = report.settings.get("embedded_stream")
+        if text_n and text_n > 1:
+            print(f"note           : the video carries {total} subtitle "
+                  f"stream(s), {text_n} textual — using stream #{used}; "
+                  "rerun with --sub-stream INDEX or --sub-language CODE to "
+                  "choose another")
     print(f"duration       : {_fmt_clock(report.total_duration)} "
           f"({report.total_duration:.1f}s)")
     print(f"model          : {report.settings.get('model_repo')} "

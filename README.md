@@ -113,7 +113,8 @@ Full options (`subcheck --help`): `--snippets` (3), `--duration` (10 s),
 `--min-gap` (30 s), `--seed`, `--model` (`large-v3`, also
 `tiny|base|small|medium|large-v2|distil-*` or any HF repo id), `--device`
 (`auto|cpu|cuda`), `--compute-type`, `--beam-size`, `--language`,
-`--max-rerolls` (3), `--no-expand-numbers`, `--workdir`, `--json FILE`.
+`--max-rerolls` (3), `--no-expand-numbers`, `--workdir`, `--json FILE`,
+`--embedded`, `--sub-stream INDEX`, `--sub-language CODE`.
 
 ### Drift statistics and classification
 
@@ -222,6 +223,38 @@ Notes:
   confident ranking.
 * unreadable/empty SRTs are reported as errors and skipped; the remaining
   files are still ranked (exit code 1 when every file failed).
+
+### Embedded subtitles (mkv / mp4 …)
+
+Videos often carry their own subtitle tracks. When no SRT argument is given,
+`check` first looks for a sidecar `.srt` next to the media and otherwise uses
+an **embedded subtitle stream** — extracting it to an SRT file with ffmpeg and
+checking that:
+
+```bash
+subcheck check movie.mkv                      # sidecar .srt, or embedded track
+subcheck check movie.mkv --embedded           # force the embedded track
+subcheck check movie.mkv --sub-stream 3       # pick a specific track
+subcheck check movie.mkv --sub-language fre   # ... or by language
+subcheck streams movie.mkv                    # list the available tracks
+```
+
+`subcheck shift` accepts a video the same way and fixes its embedded
+subtitles (optionally muxing the corrected track back into a copy of the
+video):
+
+```bash
+subcheck shift movie.mkv --by -0.989              # writes movie.fixed.srt
+subcheck shift movie.mkv --scale 0.95904 --remux movie.fixed.mkv
+```
+
+**Multiple streams.** When the video contains several *text* subtitle tracks
+and no `--sub-stream`/`--sub-language` was given, an interactive terminal run
+lists them and asks which one to use (Enter = the default-marked track). In
+batch mode (no terminal) the default/first text track is used and the report
+notes that a choice exists. Bitmap tracks (PGS/VobSub, e.g. Blu-ray
+`hdmv_pgs_subtitle`) cannot be compared textually and are rejected with a
+clear message — provide an external `.srt` instead.
 
 ### Other subcommands
 

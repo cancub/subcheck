@@ -95,7 +95,7 @@ class Options:
     """Everything that tunes a check run (mirrors the CLI)."""
 
     media: str
-    subtitle: str
+    subtitle: Optional[str] = None  # explicit SRT; None = auto-resolve
     snippets: int = 3
     duration: float = 10.0
     min_gap: float = 30.0
@@ -109,16 +109,90 @@ class Options:
     max_rerolls: int = 3
     workdir: Optional[str] = None
     expand_numbers: bool = True
+    # embedded-subtitle source selection (used when subtitle is None or
+    # use_embedded is set)
+    use_embedded: bool = False
+    sub_stream: Optional[int] = None
+    sub_language: Optional[str] = None
+
+
+def _find_sidecar_srt(media: str) -> Optional[str]:
+    """An .srt with the same base name next to the media (external check)."""
+    import glob
+
+    base = os.path.splitext(media)[0]
+    hits = sorted(glob.glob(base + "*.srt")) + sorted(glob.glob(base + ".*.srt"))
+    return hits[0] if hits else None
+
+
+def _resolve_subtitle_source(
+    opts: Options, workdir: str
+) -> "tuple[str, dict]":
+    """Decide which subtitle file to check and how it was obtained.
+
+    Returns (srt_path, source_info). Resolution order:
+      1. opts.subtitle (explicit external file)
+      2. sidecar .srt next to the media (unless --embedded forces step 3)
+      3. an embedded text subtitle stream of the media, extracted to *workdir*
+    """
+    if opts.subtitle and opts.use_embedded:
+        raise ValueError(
+            "cannot combine an explicit subtitle file with --embedded"
+        )
+    if opts.subtitle:
+        if not os.path.exists(opts.subtitle):
+            raise FileNotFoundError(
+                f"subtitle file not found: {opts.subtitle}"
+            )
+        return opts.subtitle, {"source": "external", "subtitle_file": opts.subtitle}
+    if not opts.use_embedded:
+        sidecar = _find_sidecar_srt(opts.media)
+        if sidecar:
+            return sidecar, {"source": "sidecar", "subtitle_file": sidecar}
+    # embedded: needs a probeable media file
+    from .embedded import (
+        choose_subtitle_stream,
+        extract_subtitle_stream,
+        probe_subtitle_streams,
+    )
+
+    streams = probe_subtitle_streams(opts.media)
+    stream = choose_subtitle_stream(
+        streams, index=opts.sub_stream, language=opts.sub_language
+    )
+    os.makedirs(workdir, exist_ok=True)
+    out_path = os.path.join(workdir, f"embedded_{stream.index}.srt")
+    extract_subtitle_stream(opts.media, stream, out_path)
+    text_streams = sum(1 for s in streams if s.text_capable)
+    return out_path, {
+        "source": "embedded",
+        "subtitle_file": out_path,
+        "embedded_stream": stream.index,
+        "embedded_codec": stream.codec,
+        "embedded_language": stream.language,
+        "embedded_streams_total": len(streams),
+        "embedded_text_streams": text_streams,
+        "embedded_label": f"{os.path.basename(opts.media)} — embedded "
+        f"{stream.desc}",
+    }
 
 
 def run_check(opts: Options) -> CheckReport:
-    media, subtitle = opts.media, opts.subtitle
-    if not os.path.exists(subtitle):
-        raise FileNotFoundError(f"subtitle file not found: {subtitle}")
+    media = opts.media
+
+    cleanup = None
+    if opts.workdir:
+        workdir = opts.workdir
+        os.makedirs(workdir, exist_ok=True)
+    else:
+        workdir = tempfile.mkdtemp(prefix="subcheck-")
+        cleanup = workdir
+
+    subtitle_path, source_info = _resolve_subtitle_source(opts, workdir)
 
     report = CheckReport(
         media=media,
-        subtitle=subtitle,
+        subtitle=media if source_info.get("source") == "embedded" else subtitle_path,
         total_duration=probe_duration(media),
         snippet_duration=opts.duration,
         settings={
@@ -132,11 +206,13 @@ def run_check(opts: Options) -> CheckReport:
             "max_rerolls": opts.max_rerolls,
         },
     )
+    report.settings.update(source_info)
     total = report.total_duration
-    cues: List[Cue] = read_srt(subtitle)
+    cues: List[Cue] = read_srt(subtitle_path)
     if not cues:
         raise ValueError(
-            f"subtitle file {subtitle!r} contains no usable cues — cannot compare."
+            f"subtitle file {subtitle_path!r} contains no usable cues — "
+            "cannot compare."
         )
     report.settings["cues_total"] = len(cues)
     report.settings["cues_speech"] = sum(
@@ -154,14 +230,6 @@ def run_check(opts: Options) -> CheckReport:
         initial = sampler.sample_all()
     except SamplingError as exc:
         raise ValueError(str(exc)) from None
-
-    cleanup = None
-    if opts.workdir:
-        workdir = opts.workdir
-        os.makedirs(workdir, exist_ok=True)
-    else:
-        workdir = tempfile.mkdtemp(prefix="subcheck-")
-        cleanup = workdir
 
     transcriber = Transcriber(
         model=opts.model,
