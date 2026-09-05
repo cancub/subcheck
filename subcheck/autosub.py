@@ -206,6 +206,26 @@ def _decodes(content: bytes) -> bool:
     return False
 
 
+def describe_quota(q: Optional[dict]) -> str:
+    """One-line human summary of an OpenSubtitles quota dict (from
+    OpenSubtitlesClient.quota)."""
+    if not q:
+        return "quota: no API session (everything served from cache)"
+    who = f"{q.get('username') or '?'} ({q.get('level') or 'User'})"
+    bits = []
+    remaining = q.get("remaining_downloads")
+    used = q.get("downloads_count")
+    allowed = q.get("allowed_downloads")
+    reset = q.get("reset_time")
+    if used is not None and allowed is not None:
+        bits.append(f"{used} of {allowed} downloads used today")
+    if remaining is not None:
+        bits.append(f"{remaining} remaining")
+    if reset:
+        bits.append(f"quota resets at {reset}")
+    return "quota: " + who + (" — " + ", ".join(bits) if bits else "")
+
+
 # --------------------------------------------------------------------------- #
 # OpenSubtitles API access (opensubtitlescom, lazily imported)
 
@@ -234,6 +254,21 @@ class OpenSubtitlesClient:
             return int(self._client.user_downloads_remaining)
         except Exception:
             return None
+
+    def quota(self) -> dict:
+        """Account status from the API (user_info) — mirrors the reference
+        check_quota.py output: level, allowed/remaining downloads, downloads
+        used today and when the quota resets."""
+        info = self._client.user_info() or {}
+        data = info.get("data", {}) or {}
+        return {
+            "username": self._client_creds.get("username", ""),
+            "level": data.get("level", "User"),
+            "allowed_downloads": data.get("allowed_downloads", 20),
+            "remaining_downloads": data.get("remaining_downloads"),
+            "downloads_count": data.get("downloads_count", 0),
+            "reset_time": data.get("reset_time"),
+        }
 
     def search(self, query: str, season: Optional[int], episode: Optional[int],
                language: str) -> List[dict]:
@@ -319,13 +354,17 @@ def fetch_candidates(
     limit: int = 10,
     refresh: bool = False,
     workdir: str,
-) -> List[Candidate]:
+):
     """Search + download up to *limit* candidates into *workdir*.
 
     Both tiers of the cache are honoured (0 quota on hits); ``refresh``
     re-queries and re-downloads even when cache entries exist. A broken
     cached file is purged automatically (see get_cached_file). Download
     failures mark that candidate and the rest are still fetched.
+
+    Returns ``(candidates, quota, downloads_new, cache_hits)`` where *quota*
+    is the account status dict (None when no API session was needed) — it is
+    printed on connect and refreshed after every real download.
     """
     query = str(meta["title"])
     season = meta.get("season")
@@ -335,19 +374,24 @@ def fetch_candidates(
 
     results: Optional[List[dict]] = None
     client: Optional[OpenSubtitlesClient] = None
+    quota: Optional[dict] = None
     if not refresh:
         results = get_cached_search(query, season, episode, language)
     if results is None:
         client = OpenSubtitlesClient(load_credentials())
+        quota = client.quota()
+        print(describe_quota(quota))
         print(f"Searching OpenSubtitles for {query!r}"
               + (f" S{season:02d}E{episode:02d}" if season is not None else "")
-              + f" [{language}] (downloads left: {client.downloads_remaining})...")
+              + f" [{language}]...")
         results = client.search(query, season, episode, language)
         save_cached_search(query, season, episode, language, results)
     if not results:
-        return []
+        return [], quota, 0, 0
 
     out: List[Candidate] = []
+    downloads_new = 0
+    cache_hits = 0
     for item in results[:limit]:
         file_id = int(item["file_id"])
         dest = os.path.join(cand_dir, f"cand_{len(out):02d}_file_{file_id}.srt")
@@ -360,8 +404,15 @@ def fetch_candidates(
             try:
                 if client is None:
                     client = OpenSubtitlesClient(load_credentials())
+                    quota = client.quota()
+                    print(describe_quota(quota))
+                print(f"Downloading subtitle file {file_id} "
+                      f"('{item.get('release', '')}')...")
                 content = client.download(file_id)
                 save_cached_file(file_id, content)
+                downloads_new += 1
+                quota = client.quota()  # refresh: the download counts at once
+                print(describe_quota(quota))
             except Exception as exc:  # noqa: BLE001 - quota/network errors
                 out.append(Candidate(
                     file_id=file_id,
@@ -371,6 +422,8 @@ def fetch_candidates(
                     error=f"download failed: {exc}",
                 ))
                 continue
+        else:
+            cache_hits += 1
         try:
             Path(dest).write_bytes(content)
         except OSError as exc:
@@ -389,7 +442,7 @@ def fetch_candidates(
             path=dest,
             from_cache=cached,
         ))
-    return out
+    return out, quota, downloads_new, cache_hits
 
 
 # --------------------------------------------------------------------------- #
@@ -504,6 +557,9 @@ class AutoSubResult:
     limit: int
     candidates: List[Candidate] = field(default_factory=list)
     windows_count: int = 0
+    quota: Optional[dict] = None      # account status (None when no API session)
+    downloads_new: int = 0            # downloads performed this run (quota used)
+    cache_hits: int = 0               # candidates served from the file cache
     chosen: Optional[Candidate] = None
     final_srt: str = ""
     embed_status: str = ""       # "ok" | "skipped" | "failed"
@@ -526,6 +582,9 @@ class AutoSubResult:
             "windows_count": self.windows_count,
             "candidates": [c.to_dict() for c in self.candidates],
             "chosen_index": chosen_index,
+            "quota": self.quota,
+            "downloads_new": self.downloads_new,
+            "cache_hits": self.cache_hits,
             "final_srt": self.final_srt,
             "embed_status": self.embed_status,
             "embed_out": self.embed_out,
@@ -584,11 +643,14 @@ def run_autosub(
 
     result = AutoSubResult(video=video, meta=meta, language=language, limit=limit)
     try:
-        candidates = fetch_candidates(
+        candidates, quota, downloads_new, cache_hits = fetch_candidates(
             video, meta, language=language, limit=limit, refresh=refresh,
             workdir=base,
         )
         result.candidates = candidates
+        result.quota = quota
+        result.downloads_new = downloads_new
+        result.cache_hits = cache_hits
         broken = [c for c in candidates if c.error]
         ok = [c for c in candidates if not c.error]
         if not candidates:
@@ -598,6 +660,11 @@ def run_autosub(
             f"fetched {len(ok)} candidate(s)"
             + (f"; {len(broken)} failed ({broken[0].error}" if broken else "")
             + (")" if broken else "")
+        )
+        result.notes.append(
+            describe_quota(quota)
+            + (f" — {downloads_new} downloaded, {cache_hits} from cache"
+               if downloads_new or cache_hits else "")
         )
         if not ok:
             result.error = "every subtitle candidate failed to download"

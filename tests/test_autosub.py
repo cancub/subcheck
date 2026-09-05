@@ -9,6 +9,7 @@ import pytest
 from subcheck import autosub
 from subcheck.autosub import (
     Candidate,
+    describe_quota,
     fetch_candidates,
     get_cached_file,
     get_cached_search,
@@ -152,12 +153,27 @@ def test_fetch_candidates_uses_cache_without_network(monkeypatch, tmp_path):
             "episode_of": True}
     workdir = tmp_path / "work"
     workdir.mkdir()
-    cands = fetch_candidates("Steven.Universe.S01E23.mkv", meta, limit=1,
-                             workdir=str(workdir))
+    cands, quota, downloads_new, cache_hits = fetch_candidates(
+        "Steven.Universe.S01E23.mkv", meta, limit=1, workdir=str(workdir))
     assert len(cands) == 1            # limit honoured, no API access needed
     assert cands[0].from_cache is True
     assert cands[0].file_id == 11
     assert open(cands[0].path, "rb").read() == content
+    # all-cache run: no API session, no quota used
+    assert quota is None
+    assert downloads_new == 0 and cache_hits == 1
+
+
+def test_quota_description_lines():
+    assert "no API session" in describe_quota(None)
+    q = {
+        "username": "bob", "level": "VIP",
+        "allowed_downloads": 20, "remaining_downloads": 17,
+        "downloads_count": 3, "reset_time": "2026-09-06T00:00:00Z",
+    }
+    s = describe_quota(q)
+    assert "bob (VIP)" in s and "3 of 20" in s
+    assert "17 remaining" in s and "resets at" in s
 
 
 # ------------------------------------------------- verify, fix and pick (offline)

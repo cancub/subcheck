@@ -43,6 +43,8 @@ def build_parser() -> argparse.ArgumentParser:
             "Other commands:\n"
             "  subcheck autosub movie.mkv\n"
             "      fetch, verify, fix + embed subtitles (see --help)\n"
+            "  subcheck quota\n"
+            "      show the OpenSubtitles daily download quota\n"
             "  subcheck streams movie.mkv\n"
             "      list the embedded subtitle streams of a video\n"
             "  subcheck compare movie.mp4 a.srt b.srt c.srt\n"
@@ -525,6 +527,13 @@ def print_autosub_report(result) -> None:
     print(f"searching      : {label}  [{result.language}]  "
           f"({len(result.candidates)} candidate(s), "
           f"{result.windows_count} shared window(s))")
+    if result.quota or result.downloads_new or result.cache_hits:
+        from .autosub import describe_quota
+
+        q = describe_quota(result.quota)
+        if result.downloads_new or result.cache_hits:
+            q += f"  ({result.downloads_new} downloaded, {result.cache_hits} from cache)"
+        print(f"quota          : {q}")
     print("-" * 74)
     if result.error:
         print(f"error          : {result.error}")
@@ -571,6 +580,41 @@ def print_autosub_report(result) -> None:
             print(f"embedded      : {result.embed_out}")
         else:
             print(f"embedding     : {result.embed_status}")
+
+
+def build_quota_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="subcheck quota",
+        description=(
+            "Show the OpenSubtitles.com account status and daily download "
+            "quota (the reference check_quota.py output, integrated): level, "
+            "allowed/remaining downloads, downloads used today and the reset "
+            "time. Credentials come from .env or "
+            "~/.config/opensubtitlescom/config.json."
+        ),
+        formatter_class=_RawDefaultsHelpFormatter,
+    )
+    return p
+
+
+def run_quota_cli(args) -> int:
+    from .autosub import OpenSubtitlesClient, load_credentials
+
+    creds = load_credentials()
+    client = OpenSubtitlesClient(creds)
+    q = client.quota()
+    line = "=" * 49
+    print(line)
+    print(" OpenSubtitles.com Account Status")
+    print(line)
+    print(f" Username            : {q.get('username')}")
+    print(f" Rank / Level        : {q.get('level', 'User')}")
+    print(f" Allowed Daily Limit : {q.get('allowed_downloads')} downloads/day")
+    print(f" Downloads Remaining : {q.get('remaining_downloads')}")
+    print(f" Downloads Used      : {q.get('downloads_count')}")
+    print(f" Quota Resets In     : {q.get('reset_time')}")
+    print(line)
+    return 0
 
 
 def build_streams_parser() -> argparse.ArgumentParser:
@@ -622,6 +666,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                 json.dump(result.to_dict(), fh, indent=2, ensure_ascii=False)
             print(f"\nJSON report written to {args.json}")
         return 1 if result.error else 0
+    if argv and argv[0] == "quota":
+        args = build_quota_parser().parse_args(argv[1:])
+        try:
+            return run_quota_cli(args)
+        except Exception as exc:  # noqa: BLE001 - credentials/network
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
     if argv and argv[0] == "streams":
         args = build_streams_parser().parse_args(argv[1:])
         try:

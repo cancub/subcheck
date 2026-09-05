@@ -246,7 +246,13 @@ How it works:
    cached under `.cache/opensubtitles/` — a cache hit costs **0** of the
    20-downloads/day quota. `--refresh` bypasses both caches (use it when a
    previous pull gave bad subs), and a corrupt cached file is purged and
-   re-downloaded automatically.
+   re-downloaded automatically. **Quota visibility:** when an API session is
+   opened the account status is printed (level, downloads used/allowed,
+   remaining, reset time) and refreshed after every download — e.g.
+   `quota: bob (User) — 3 of 20 downloads used today, 17 remaining, quota
+   resets at 2026-09-06T00:00:00Z` — plus a summary line in the `--json`
+   report (`quota`, `downloads_new`, `cache_hits`). Standalone account
+   status: `subcheck quota`.
 2. **Verify** — the `--limit` candidates (default 10) are scored against the
    video with one ASR pass over the same sampled windows (the compare
    engine): per-candidate composite, text accuracy and drift diagnosis.
