@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from typing import List, Optional
 
@@ -40,6 +41,8 @@ def build_parser() -> argparse.ArgumentParser:
             "and compare text (WER) and timing (IoU) against the subtitle file.\n"
             "\n"
             "Other commands:\n"
+            "  subcheck compare movie.mp4 a.srt b.srt c.srt\n"
+            "      compare subtitle files on the same windows (see --help)\n"
             "  subcheck rescore windows.json other.srt\n"
             "      re-score saved windows against another SRT\n"
             "  subcheck shift movie.srt --by -0.989\n"
@@ -58,6 +61,10 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="?",
         help="SRT file to check; omit to let it be auto-detected next to the media",
     )
+    _add_run_options(p, rerolls=True)
+    return p
+def _add_run_options(p: argparse.ArgumentParser, rerolls: bool = True) -> None:
+    """The knobs shared by `check` and `compare`."""
     p.add_argument("--snippets", type=int, default=3,
                    help="number of random windows to check")
     p.add_argument("--duration", type=float, default=10.0,
@@ -77,16 +84,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--beam-size", type=int, default=5, help="whisper beam size")
     p.add_argument("--language", default=None,
                    help="spoken language hint (ISO code), auto-detected when omitted")
-    p.add_argument("--max-rerolls", type=int, default=3,
-                   help="re-rolls allowed when a window has subtitles but no speech "
-                        "(music interludes)")
+    if rerolls:
+        p.add_argument("--max-rerolls", type=int, default=3,
+                       help="re-rolls allowed when a window has subtitles but no speech "
+                            "(music interludes)")
     p.add_argument("--no-expand-numbers", action="store_true",
                    help="do not expand numerals to words before comparing")
     p.add_argument("--workdir", default=None,
                    help="keep extracted WAV snippets in this directory (default: temp)")
     p.add_argument("--json", metavar="FILE", default=None,
                    help="also write the full machine-readable report to FILE")
-    return p
 
 
 def auto_subtitle(media: str) -> Optional[str]:
@@ -97,6 +104,153 @@ def auto_subtitle(media: str) -> Optional[str]:
     base = os.path.splitext(media)[0]
     hits = sorted(glob.glob(base + "*.srt")) + sorted(glob.glob(base + ".*.srt"))
     return hits[0] if hits else None
+
+
+def build_compare_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="subcheck compare",
+        description=(
+            "Compare several subtitle files against the SAME sampled windows.\n"
+            "\n"
+            "With a video: one ffprobe/ffmpeg/ASR pass samples and transcribes\n"
+            "the windows, then every SRT is scored against those identical\n"
+            "windows and ranked by composite score:\n"
+            "    subcheck compare movie.mp4 a.srt b.srt c.srt [--snippets 4]\n"
+            "\n"
+            "With --from: windows of a previous 'subcheck check --json' report\n"
+            "are re-used, so no media access or ASR is needed (fast, perfect\n"
+            "for checking whether a fix improved things):\n"
+            "    subcheck compare --from windows.json a.srt a.fixed.srt\n"
+            "\n"
+            "All files are scored on identical windows, so the ranking is\n"
+            "apples-to-apples. Windows where no speech was recognised count as\n"
+            "perfect (100 %) for every file that has no text there; a file with\n"
+            "text in a silent window is penalised for that window."
+        ),
+        formatter_class=_RawDefaultsHelpFormatter,
+    )
+    p.add_argument(
+        "targets",
+        nargs="*",
+        metavar="MEDIA_OR_SRT",
+        help="without --from: the video followed by the SRT files to compare; "
+             "with --from: just the SRT files",
+    )
+    p.add_argument(
+        "--from", dest="from_json", metavar="WINDOWS_JSON", default=None,
+        help="reuse windows + ASR segments from this report JSON instead of "
+             "probing/transcribing (skips media access)",
+    )
+    _add_run_options(p, rerolls=False)
+    return p
+
+
+def run_compare_cli(args) -> "CompareReport":
+    from .runner import run_compare
+
+    media = None
+    if args.from_json:
+        subtitles = list(args.targets)
+    else:
+        if len(args.targets) < 2:
+            raise ValueError(
+                "compare needs either: a video + subtitle files to compare, "
+                "or --from windows.json + subtitle files"
+            )
+        media = args.targets[0]
+        subtitles = args.targets[1:]
+    return run_compare(
+        subtitles,
+        media=media,
+        windows_json=args.from_json,
+        snippets=args.snippets,
+        duration=args.duration,
+        min_gap=args.min_gap,
+        seed=args.seed,
+        model=args.model,
+        device=args.device,
+        compute_type=args.compute_type,
+        download_root=args.model_dir,
+        beam_size=args.beam_size,
+        language=args.language,
+        workdir=args.workdir,
+        expand_numbers=not args.no_expand_numbers,
+    )
+
+
+def _drift_short(entry) -> str:
+    ds = entry.report.drift_summary
+    if ds is None:
+        return "-"
+    if ds.category == "good":
+        return "good"
+    if ds.category == "consistent":
+        return f"consistent {ds.mean:+.2f}s"
+    if ds.category == "fps":
+        return f"bad fps ({abs(ds.rate_delta_pct or 0.0):.2f}%/s)"
+    if ds.matched_lines == 0:
+        return "bad (no matches)"
+    return "bad (inconsistent)"
+
+
+def print_compare_report(report) -> None:
+    print(f"subcheck {__version__}  —  subtitle comparison "
+          f"({len(report.entries)} file(s), {report.window_count} shared window(s))")
+    print("-" * 78)
+    if report.media:
+        print(f"media          : {report.media}  ({_fmt_clock(report.total_duration)})")
+    if report.settings.get("model_repo"):
+        print(f"model          : {report.settings.get('model_repo')} "
+              f"[{report.settings.get('device')} / {report.settings.get('compute_type')}]")
+    print(f"windows        : {report.window_count} window(s) of "
+          f"{report.snippet_duration:g}s, seed {report.settings.get('seed')}")
+    starts = ", ".join(_fmt_clock(s.start) for s, _, _ in report.records[:6])
+    if report.window_count > 6:
+        starts += ", ..."
+    print(f"at             : {starts}")
+
+    print("-" * 78)
+    print(f"{'rank':>4}  {'subtitle':<34} {'text':>8} {'IoU':>8} {'score':>8}  drift")
+    print("-" * 78)
+    for entry in report.entries:
+        if entry.report is None:
+            print(f"  -   {os.path.basename(entry.subtitle):<34} ERROR: {entry.error}")
+            continue
+        r = entry.report
+        s = r.summary
+        name = os.path.basename(entry.subtitle)
+        if len(name) > 34:
+            name = name[:31] + "..."
+        rank = "-" if entry.rank is None else f"#{entry.rank}"
+        drift = _drift_short(entry)
+        print(
+            f"{rank:>4}  {name:<34}"
+            f" {_fmt_pct(s.get('text_accuracy_mean')):>8}"
+            f" {_fmt_pct(s.get('iou_mean')):>8}"
+            f" {_fmt_pct(s.get('composite_mean')):>8}  {drift}"
+        )
+    print("-" * 78)
+
+    fixable = [e for e in report.entries if e.report and e.report.fix_command]
+    for e in fixable:
+        print(f"fix #{e.rank} ({os.path.basename(e.subtitle)}):")
+        print(f"       {e.report.fix_command}")
+    errors = [e for e in report.entries if e.error]
+    for e in errors:
+        print(f"* {e.subtitle}: {e.error}")
+    best = next((e for e in report.entries if e.rank == 1), None)
+    if best is not None and best.report:
+        mean = best.report.summary.get("composite_mean")
+        print(f"best match    : {best.subtitle} "
+              f"(composite {mean:.1f}%)")
+    elif report.error:
+        print(f"error: {report.error}")
+    # explain what affects the ranking when speech windows are missing
+    voiced = sum(1 for _, segs, _ in report.records if segs)
+    if voiced < report.window_count:
+        print(f"note          : {report.window_count - voiced} window(s) had no "
+              "recognised speech — every file with no text there scored 100 % "
+              "for them, files with text scored 0 %")
 
 
 def build_shift_parser() -> argparse.ArgumentParser:
@@ -200,6 +354,19 @@ def run_rescore(args) -> CheckReport:
 
 def main(argv: Optional[List[str]] = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "compare":
+        args = build_compare_parser().parse_args(argv[1:])
+        try:
+            report = run_compare_cli(args)
+        except (ValueError, FileNotFoundError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print_compare_report(report)
+        if args.json:
+            with open(args.json, "w", encoding="utf-8") as fh:
+                json.dump(report.to_dict(), fh, indent=2, ensure_ascii=False)
+            print(f"\nJSON report written to {args.json}")
+        return 1 if report.error else 0
     if argv and argv[0] == "shift":
         args = build_shift_parser().parse_args(argv[1:])
         try:

@@ -225,12 +225,85 @@ def run_check(opts: Options) -> CheckReport:
         report.windows = sorted(
             (o for o in outcomes), key=lambda o: o.snippet.start
         )
-        report.summary = summarize([o.score for o in report.windows if o.score])
-        _flag_and_drift(report)
+        finalize(report)
         return report
     finally:
         if cleanup and os.path.isdir(cleanup):
             shutil.rmtree(cleanup, ignore_errors=True)
+
+
+def finalize(report: CheckReport) -> None:
+    """Aggregate per-window scores and run the flag/drift/verdict logic."""
+    report.summary = summarize([o.score for o in report.windows if o.score])
+    _flag_and_drift(report)
+
+
+# ----------------------------------------------------------------- window records
+# A "window record" is a shared sampling unit: (snippet, global segments, wav).
+# Records are what every subtitle candidate gets scored against — identical
+# for all files, which is what makes a comparison fair.
+
+WindowRecord = tuple  # (Snippet, List[Segment], str)
+
+
+def load_window_records(windows_json: str):
+    """Load window records + run metadata from a report JSON."""
+    import json
+
+    with open(windows_json, encoding="utf-8") as fh:
+        data = json.load(fh)
+    records = []
+    for w in data.get("windows", []):
+        wstart = float(w["start"])
+        wend = float(w["end"])
+        snip = Snippet(index=len(records), start=wstart, duration=wend - wstart)
+        segments = [
+            Segment(float(s["start"]), float(s["end"]), s["text"])
+            for s in w.get("asr_segments", [])
+        ]
+        records.append((snip, segments, w.get("wav", "")))
+    return records, data
+
+
+def score_subtitle_file(
+    subtitle: str,
+    records,
+    *,
+    media: str = "",
+    total_duration: float = 0.0,
+    snippet_duration: float = 10.0,
+    settings: Optional[dict] = None,
+    expand_numbers: bool = True,
+) -> CheckReport:
+    """Score one SRT file against the given window records."""
+    cues: List[Cue] = read_srt(subtitle)
+    if not cues:
+        raise ValueError(f"subtitle file {subtitle!r} contains no usable cues")
+
+    outcomes: List[WindowOutcome] = []
+    for snip, segments, wav in records:
+        window_cues = cues_overlapping(cues, snip.start, snip.end)
+        score = score_window(
+            segments,
+            window_cues,
+            snip.start,
+            snip.end,
+            expand_numbers=expand_numbers,
+            cue_pool=cues,
+        )
+        outcomes.append(
+            WindowOutcome(snippet=snip, wav_path=wav, status=score.status, score=score)
+        )
+    report = CheckReport(
+        media=media,
+        subtitle=subtitle,
+        total_duration=total_duration,
+        snippet_duration=snippet_duration,
+        windows=outcomes,
+        settings=dict(settings or {}) | {"cues_total": len(cues), "mode": "rescore"},
+    )
+    finalize(report)
+    return report
 
 
 def rescore_windows(
@@ -244,48 +317,238 @@ def rescore_windows(
     the comparison stage (no probing/slicing/ASR) — useful to compare several
     subtitle candidates for the same video.
     """
-    import json
-
-    with open(windows_json, encoding="utf-8") as fh:
-        data = json.load(fh)
-
-    cues: List[Cue] = read_srt(subtitle)
-    if not cues:
-        raise ValueError(f"subtitle file {subtitle!r} contains no usable cues")
-
-    outcomes: List[WindowOutcome] = []
-    for w in data.get("windows", []):
-        wstart = float(w["start"])
-        wend = float(w["end"])
-        segments = [
-            Segment(float(s["start"]), float(s["end"]), s["text"])
-            for s in w.get("asr_segments", [])
-        ]
-        # prefer a fresh, meaningful snippet index
-        snip = Snippet(index=len(outcomes), start=wstart, duration=wend - wstart)
-        window_cues = cues_overlapping(cues, wstart, wend)
-        score = score_window(
-            segments,
-            window_cues,
-            wstart,
-            wend,
-            expand_numbers=expand_numbers,
-            cue_pool=cues,
-        )
-        outcomes.append(
-            WindowOutcome(snippet=snip, wav_path=w.get("wav", ""), status=score.status, score=score)
-        )
-
-    report = CheckReport(
+    records, data = load_window_records(windows_json)
+    return score_subtitle_file(
+        subtitle,
+        records,
         media=data.get("media", ""),
-        subtitle=subtitle,
         total_duration=float(data.get("total_duration_s", 0.0) or 0.0),
         snippet_duration=float(data.get("snippet_duration_s", 10.0)),
-        windows=outcomes,
-        settings=dict(data.get("settings", {})) | {"cues_total": len(cues), "mode": "rescore"},
+        settings=dict(data.get("settings", {})),
+        expand_numbers=expand_numbers,
     )
-    report.summary = summarize([o.score for o in report.windows if o.score])
-    _flag_and_drift(report)
+
+
+# --------------------------------------------------------------- multi-file compare
+@dataclass
+class CompareEntry:
+    """One subtitle file inside a comparison."""
+
+    subtitle: str
+    report: Optional[CheckReport] = None
+    error: Optional[str] = None
+    rank: Optional[int] = None  # 1 = best composite score; None = failed
+
+    def to_dict(self) -> dict:
+        return {
+            "rank": self.rank,
+            "subtitle": self.subtitle,
+            "error": self.error,
+            "report": None if self.report is None else self.report.to_dict(),
+        }
+
+
+@dataclass
+class CompareReport:
+    """Result of comparing several subtitle files against identical windows."""
+
+    mode: str                        # "live" (fresh ASR pass) or "json" (reuse)
+    records: list                    # shared WindowRecords
+    entries: List[CompareEntry] = field(default_factory=list)
+    media: str = ""
+    total_duration: float = 0.0
+    snippet_duration: float = 10.0
+    settings: dict = field(default_factory=dict)
+    error: Optional[str] = None
+
+    @property
+    def window_count(self) -> int:
+        return len(self.records)
+
+    def to_dict(self) -> dict:
+        return {
+            "tool": f"subcheck {__version__}",
+            "mode": self.mode,
+            "media": self.media,
+            "total_duration_s": round(self.total_duration, 3),
+            "snippet_duration_s": self.snippet_duration,
+            "settings": self.settings,
+            "shared_windows": [
+                {
+                    "start": round(snip.start, 3),
+                    "end": round(snip.end, 3),
+                    "wav": wav,
+                    "asr_segments": [
+                        {"start": round(s.start, 3), "end": round(s.end, 3), "text": s.text}
+                        for s in segs
+                    ],
+                }
+                for snip, segs, wav in self.records
+            ],
+            "files": [e.to_dict() for e in self.entries],
+            "error": self.error,
+        }
+
+
+def _capture_live_windows(media: str, opts: Options):
+    """Sample + transcribe windows once (no per-file re-rolls, so every
+    candidate is judged on the very same windows). Returns (records, total,
+    workdir_cleanup)."""
+    total = probe_duration(media)
+    sampler = SnippetSampler(
+        total=total,
+        duration=opts.duration,
+        count=opts.snippets,
+        min_gap=opts.min_gap,
+        seed=opts.seed,
+    )
+    try:
+        snippets = sampler.sample_all()
+    except SamplingError as exc:
+        raise ValueError(str(exc)) from None
+
+    cleanup = None
+    if opts.workdir:
+        workdir = opts.workdir
+        os.makedirs(workdir, exist_ok=True)
+    else:
+        workdir = tempfile.mkdtemp(prefix="subcheck-")
+        cleanup = workdir
+
+    transcriber = Transcriber(
+        model=opts.model,
+        device=opts.device,
+        compute_type=opts.compute_type,
+        download_root=opts.download_root,
+        beam_size=opts.beam_size,
+        language=opts.language,
+    )
+    records = []
+    model_info = {}
+    try:
+        for snippet in snippets:
+            wav = os.path.join(workdir, f"snippet_{snippet.index:02d}.wav")
+            extract_audio(media, snippet, wav)
+            local_segments = transcriber.transcribe_wav(wav)
+            global_segments = [
+                Segment(s.start + snippet.start, s.end + snippet.start, s.text)
+                for s in local_segments
+            ]
+            records.append((snippet, global_segments, wav))
+        model_info = {
+            "model_repo": transcriber.repo,
+            "device": transcriber.device,
+            "compute_type": transcriber.compute_type,
+        }
+    finally:
+        # keep the wavs when the caller asked for a workdir, else clean up
+        if cleanup and os.path.isdir(cleanup):
+            shutil.rmtree(cleanup, ignore_errors=True)
+    return records, total, model_info
+
+
+def run_compare(
+    subtitles: List[str],
+    *,
+    media: Optional[str] = None,
+    windows_json: Optional[str] = None,
+    duration: float = 10.0,
+    min_gap: float = 30.0,
+    snippets: int = 3,
+    seed: Optional[int] = None,
+    model: str = "large-v3",
+    device: str = "auto",
+    compute_type: Optional[str] = None,
+    download_root: Optional[str] = None,
+    beam_size: int = 5,
+    language: Optional[str] = None,
+    workdir: Optional[str] = None,
+    expand_numbers: bool = True,
+) -> CompareReport:
+    """Score *every* subtitle file against the *same* sampled windows.
+
+    mode "live": one ffprobe/ffmpeg/ASR pass over the media, then each SRT is
+    scored against those windows; mode "json": windows come from a previous
+    ``subcheck check --json`` report (no media/ASR needed).
+    """
+    if not subtitles:
+        raise ValueError("no subtitle files given to compare")
+    if windows_json:
+        records, data = load_window_records(windows_json)
+        report = CompareReport(
+            mode="json",
+            records=records,
+            media=data.get("media", ""),
+            total_duration=float(data.get("total_duration_s", 0.0) or 0.0),
+            snippet_duration=float(data.get("snippet_duration_s", duration)),
+            settings=dict(data.get("settings", {})) | {"mode": "json"},
+        )
+    else:
+        if not media:
+            raise ValueError("compare needs either a video (media) or --from windows.json")
+        opts = Options(
+            media=media,
+            subtitle=subtitles[0],  # only used as a placeholder
+            snippets=snippets,
+            duration=duration,
+            min_gap=min_gap,
+            seed=seed,
+            model=model,
+            device=device,
+            compute_type=compute_type,
+            download_root=download_root,
+            beam_size=beam_size,
+            language=language,
+            workdir=workdir,
+        )
+        records, total, model_info = _capture_live_windows(media, opts)
+        report = CompareReport(
+            mode="live",
+            records=records,
+            media=media,
+            total_duration=total,
+            snippet_duration=duration,
+            settings={
+                "snippets": snippets,
+                "min_gap": min_gap,
+                "seed": seed,
+                "model": model,
+                "device": device,
+                "beam_size": beam_size,
+                "language": language,
+                "mode": "live",
+                **model_info,
+            },
+        )
+
+    for subtitle in subtitles:
+        try:
+            entry_report = score_subtitle_file(
+                subtitle,
+                records,
+                media=report.media,
+                total_duration=report.total_duration,
+                snippet_duration=report.snippet_duration,
+                settings=report.settings,
+                expand_numbers=expand_numbers,
+            )
+            report.entries.append(CompareEntry(subtitle=subtitle, report=entry_report))
+        except Exception as exc:  # noqa: BLE001 - keep comparing the others
+            report.entries.append(CompareEntry(subtitle=subtitle, error=str(exc)))
+
+    # rank by composite score (best first); failed files rank last (no rank)
+    def score_key(entry: CompareEntry):
+        if entry.report is None:
+            return -1.0
+        mean = entry.report.summary.get("composite_mean")
+        return -1.0 if mean is None else float(mean)
+
+    report.entries.sort(key=score_key, reverse=True)
+    for i, entry in enumerate(report.entries, start=1):
+        if entry.report is not None and entry.report.summary.get("composite_mean") is not None:
+            entry.rank = i
+    if all(e.error for e in report.entries):
+        report.error = "none of the subtitle files could be scored"
     return report
 
 

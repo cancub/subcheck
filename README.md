@@ -193,12 +193,43 @@ defaults to `<name>.fixed.srt` next to the input (`--out PATH` to choose);
 cue times that would become negative are clamped to zero. Verify the fix by
 re-scoring the result (below).
 
+### Comparing subtitle files — `subcheck compare`
+
+Pick the best of several SRT candidates for the same video. Every file is
+scored against the **identical** windows, so the ranking is apples-to-apples:
+
+```bash
+# fresh windows: one probe/slice/ASR pass, then every SRT is scored on them
+subcheck compare movie.mp4 a.srt b.srt c.srt --snippets 4
+
+# reuse the windows of a previous check (no media access / no ASR)
+subcheck check movie.mp4 a.srt --seed 42 --json windows.json
+subcheck compare --from windows.json a.srt a.fixed.srt b.srt
+```
+
+Output: a ranked table (text accuracy, temporal IoU, composite score, drift
+classification per file), the fix command for every fixable file, and the
+best match. `--json FILE` writes the full detail (shared windows plus the
+per-file, per-window scores).
+
+Notes:
+
+* windows where no speech was recognised count as perfect (100 %) for every
+  file that has no text there; a file that does show text in a silent window
+  is penalised for that window — identically for all candidates.
+* live mode deliberately does **not** re-roll windows per file: candidates
+  must all face the same windows. Pick `--snippets` big enough for a
+  confident ranking.
+* unreadable/empty SRTs are reported as errors and skipped; the remaining
+  files are still ranked (exit code 1 when every file failed).
+
 ### Other subcommands
 
-* `subcheck rescore windows.json other.srt` — re-score previously
-  transcribed windows (from `--json FILE`) against another subtitle file
-  without re-running ffmpeg/ASR. Handy for comparing subtitle candidates or
-  verifying that a `subcheck shift` really fixed the drift:
+* `subcheck rescore windows.json other.srt` — the single-file variant of
+  `compare --from`: re-score previously transcribed windows (from
+  `--json FILE`) against one other subtitle file, without re-running
+  ffmpeg/ASR. Handy for verifying that a `subcheck shift` really fixed the
+  drift:
 
   ```bash
   subcheck movie.mp4 movie.srt --seed 42 --json first.json
