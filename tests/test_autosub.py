@@ -202,6 +202,9 @@ def test_evaluate_pick_adopts_verified_shift(tmp_path):
     # perfect file: as-is, no fix needed
     assert cand_a.best_mode == "as-is"
     assert cand_a.composite == 100.0
+    # per-snippet drift samples feed the histogram (one value per window)
+    assert cand_a.drift_samples == [0.0, 0.0]
+    assert cand_b.drift_samples == pytest.approx([2.0, 2.0])
     # shifted file: diagnosis suggests a shift; verify it before adopting
     assert cand_b.best_mode == "shift"
     assert cand_b.best_by == pytest.approx(-2.0, abs=0.2)

@@ -323,6 +323,9 @@ class Candidate:
     composite_after: Optional[float] = None    # after the applied fix
     text_after: Optional[float] = None
     rank: Optional[int] = None
+    drift_samples: List[float] = field(default_factory=list)
+    # per-snippet drift of this candidate (median matched offset per window,
+    # seconds; + = subtitles run late) — the values behind the histogram
 
     def to_dict(self) -> dict:
         return {
@@ -343,6 +346,7 @@ class Candidate:
             "text_after": (None if self.text_after is None
                            else round(self.text_after, 2)),
             "rank": self.rank,
+            "drift_samples": [round(d, 3) for d in self.drift_samples],
         }
 
 
@@ -477,6 +481,11 @@ def evaluate_and_pick(
         cand.drift = ds.label if ds else ""
         cand.composite_after = cand.composite
         cand.text_after = cand.text_accuracy
+        cand.drift_samples = [
+            o.score.drift_seconds
+            for o in rep.windows
+            if o.score and not o.rolled and o.score.drift_seconds is not None
+        ]
         if ds is None or cand.composite is None:
             continue
         if ds.fix_by is None and ds.fix_scale is None:

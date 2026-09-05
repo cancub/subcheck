@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 from typing import List, Optional
@@ -11,6 +12,62 @@ from typing import List, Optional
 from . import __version__
 from .runner import CheckReport, Options, run_check
 from .tools import ToolError
+
+
+# --------------------------------------------------------------------------- #
+# per-snippet drift histograms (shared by check/rescore/compare/autosub)
+
+def drift_samples_of(report: CheckReport) -> List[float]:
+    """The per-snippet drift values of a check report (median matched offset
+    of each non-rolled window, seconds; + = subtitles run late)."""
+    return [
+        o.score.drift_seconds
+        for o in report.windows
+        if o.score and not o.rolled and o.score.drift_seconds is not None
+    ]
+
+
+def drift_histogram_lines(samples: List[float], max_bins: int = 16) -> List[str]:
+    """ASCII histogram lines of drift samples, buckets anchored on round
+    second multiples so a zero bucket always exists when values cross 0."""
+    if not samples:
+        return ["(no per-snippet drift samples)"]
+    lo, hi = min(samples), max(samples)
+    spread = hi - lo
+    width = 60.0
+    for w in (0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0):
+        if spread <= w * max_bins:
+            width = w
+            break
+    start = math.floor(lo / width) * width
+    lines = []
+    t = start
+    while t < hi + 1e-9:
+        if abs(t) < 1e-9:      # keep the zero boundary crisp (+0.00, not -0.00)
+            t = 0.0
+        count = sum(1 for s in samples if t <= s < t + width)
+        lines.append(f"  {t:+7.2f} .. {t + width:+7.2f}s  {'#' * count}")
+        t += width
+    return lines
+
+
+def print_drift_histograms(
+    label: str,
+    samples: List[float],
+    total_windows: Optional[int] = None,
+    indent: str = "",
+) -> None:
+    """Console block for one set of per-snippet drift samples."""
+    if not samples:
+        return
+    head = f"{label} — per-snippet drift (seconds, + = subtitles run late), n={len(samples)}"
+    if total_windows is not None and total_windows > len(samples):
+        head += (f" ({total_windows - len(samples)} window(s) without a "
+                 "measurable drift: silent/music or no text match)")
+    print(f"{indent}{head}")
+    for line in drift_histogram_lines(samples):
+        print(f"{indent}  {line.strip()}")
+
 
 
 def _fmt_clock(seconds: float) -> str:
@@ -256,6 +313,28 @@ def print_compare_report(report) -> None:
         print(f"note          : {report.window_count - voiced} window(s) had no "
               "recognised speech — every file with no text there scored 100 % "
               "for them, files with text scored 0 %")
+
+    # per-file drift histograms over the shared snippets
+    hists = [
+        e
+        for e in sorted(
+            (e for e in report.entries if e.report and e.rank),
+            key=lambda e: e.rank,
+        )
+        if drift_samples_of(e.report)
+    ]
+    if hists:
+        print("-" * 78)
+        print("drift histograms — per-snippet drift per file "
+              "(seconds, + = subtitles run late):")
+        for e in hists:
+            samples = drift_samples_of(e.report)
+            name = os.path.basename(e.subtitle)
+            if len(name) > 60:
+                name = name[:57] + "..."
+            print(f"  #{e.rank} {name} (n={len(samples)}):")
+            for line in drift_histogram_lines(samples):
+                print(f"      {line.strip()}")
 
 
 def build_shift_parser() -> argparse.ArgumentParser:
@@ -581,6 +660,27 @@ def print_autosub_report(result) -> None:
         else:
             print(f"embedding     : {result.embed_status}")
 
+    # per-candidate drift histograms over the shared snippets
+    with_drift = [
+        c
+        for c in sorted(
+            (c for c in result.candidates if c.rank and c.drift_samples),
+            key=lambda c: c.rank,
+        )
+    ]
+    if with_drift:
+        print("-" * 74)
+        print("drift histograms — per-snippet drift per candidate "
+              "(seconds, + = subtitles run late):")
+        for c in with_drift:
+            name = (c.release or c.file_name) or f"file {c.file_id}"
+            if len(name) > 58:
+                name = name[:55] + "..."
+            mode = f" (chosen fix: {c.best_mode})" if c.best_mode != "as-is" else ""
+            print(f"  #{c.rank} {name} (n={len(c.drift_samples)}){mode}")
+            for line in drift_histogram_lines(c.drift_samples):
+                print(f"      {line.strip()}")
+
 
 def build_quota_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -836,6 +936,12 @@ def print_report(report: CheckReport) -> None:
             print(f"               ({ds.note})")
         if report.fix_command:
             print(f"fix command   : {report.fix_command}")
+    samples = drift_samples_of(report)
+    scored_total = sum(
+        1 for o in report.windows if o.score and not o.rolled
+    )
+    if samples:
+        print_drift_histograms("drift histogram", samples, scored_total)
     summary = report.summary
     mean = summary.get("composite_mean")
     if mean is not None:

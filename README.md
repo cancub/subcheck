@@ -122,7 +122,17 @@ Full options (`subcheck --help`): `--snippets` (10), `--duration` (10 s),
 Every transcribed speech segment that can be textually matched to a subtitle
 cue contributes one offset sample (`cue_start − segment_start`; positive =
 the subtitles run late). The report prints the **mean and standard deviation
-of those offsets** across all checked windows and classifies the result:
+of those offsets** across all checked windows and classifies the result.
+Every command that measures drift — `check`, `rescore`, `compare` and
+`autosub` — also prints an ASCII **histogram of the per-snippet drift values**
+(one bucket row per second range, `#` per window in that bucket; bins are
+anchored so `+0.00` marks the zero boundary; windows without a measurable
+drift — silent/music or no text match — are excluded and counted in the
+header). In `compare`/`autosub` each file/candidate gets its own histogram
+over the shared snippets, and the per-candidate values are stored in the
+`--json` output (`drift_samples`).
+
+The classification buckets are:
 
 * **good match** — average drift under 100 ms: nothing to fix.
 * **consistent drift** — average offset beyond 100 ms but the lines agree
