@@ -110,7 +110,7 @@ subcheck movie.mp4 movie.srt --model medium --device cpu
 subcheck movie.mp4 movie.srt --snippets 6 --workdir ./snippets
 ```
 
-Full options (`subcheck --help`): `--snippets` (3), `--duration` (10 s),
+Full options (`subcheck --help`): `--snippets` (10), `--duration` (10 s),
 `--min-gap` (30 s), `--seed`, `--model` (`large-v3`, also
 `tiny|base|small|medium|large-v2|distil-*` or any HF repo id), `--device`
 (`auto|cpu|cuda`), `--compute-type`, `--beam-size`, `--language`,
@@ -232,7 +232,7 @@ verify them against the video's own audio, fix the best one, embed it:
 
 ```bash
 subcheck autosub movie.mkv                    # full auto, then muxes the winner
-subcheck autosub movie.mkv --limit 10 --no-embed --json report.json
+subcheck autosub movie.mkv --limit 3 --no-embed --json report.json
 subcheck autosub show.mkv --language en --refresh   # ignore caches (redo pulls)
 ```
 
@@ -253,7 +253,7 @@ How it works:
    resets at 2026-09-06T00:00:00Z` — plus a summary line in the `--json`
    report (`quota`, `downloads_new`, `cache_hits`). Standalone account
    status: `subcheck quota`.
-2. **Verify** — the `--limit` candidates (default 10) are scored against the
+2. **Verify** — the `--limit` candidates (default 3) are scored against the
    video with one ASR pass over the same sampled windows (the compare
    engine): per-candidate composite, text accuracy and drift diagnosis.
 3. **Pick** — when the diagnosis says a candidate is fixable (consistent

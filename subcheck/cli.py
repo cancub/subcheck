@@ -80,7 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 def _add_run_options(p: argparse.ArgumentParser, rerolls: bool = True) -> None:
     """The knobs shared by `check` and `compare`."""
-    p.add_argument("--snippets", type=int, default=3,
+    p.add_argument("--snippets", type=int, default=10,
                    help="number of random windows to check")
     p.add_argument("--duration", type=float, default=10.0,
                    help="window duration in seconds")
@@ -426,7 +426,7 @@ def build_autosub_parser() -> argparse.ArgumentParser:
             "with the compare engine, pick the best fit — trying its diagnosed "
             "drift/timebase fix first — and embed it into a copy of the video.\n"
             "\n"
-            "Usage: subcheck autosub movie.mkv [--limit 10] [--no-embed]\n"
+            "Usage: subcheck autosub movie.mkv [--limit 3] [--no-embed]\n"
             "       subcheck autosub show.mkv --language en --refresh\n"
             "\n"
             "Credentials come from .env (OPENSUBTITLES_API_KEY/_USERNAME/"
@@ -438,7 +438,7 @@ def build_autosub_parser() -> argparse.ArgumentParser:
         formatter_class=_RawDefaultsHelpFormatter,
     )
     p.add_argument("video", help="video file to find subtitles for")
-    p.add_argument("--limit", type=int, default=10,
+    p.add_argument("--limit", type=int, default=3,
                    help="how many candidates to fetch and compare (downloads "
                         "only count against the quota when not cached)")
     p.add_argument("--language", default="en", metavar="CODE",
@@ -461,7 +461,7 @@ def build_autosub_parser() -> argparse.ArgumentParser:
     p.add_argument("--out-srt", default=None, metavar="PATH",
                    help="where to write the winning .srt "
                         "(default: <video>.autosub.srt next to the source)")
-    p.add_argument("--snippets", type=int, default=3,
+    p.add_argument("--snippets", type=int, default=10,
                    help="number of random windows to verify with")
     p.add_argument("--duration", type=float, default=10.0,
                    help="window duration in seconds")

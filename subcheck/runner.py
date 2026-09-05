@@ -96,7 +96,7 @@ class Options:
 
     media: str
     subtitle: Optional[str] = None  # explicit SRT; None = auto-resolve
-    snippets: int = 3
+    snippets: int = 10
     duration: float = 10.0
     min_gap: float = 30.0
     seed: Optional[int] = None
@@ -522,7 +522,7 @@ def run_compare(
     windows_json: Optional[str] = None,
     duration: float = 10.0,
     min_gap: float = 30.0,
-    snippets: int = 3,
+    snippets: int = 10,
     seed: Optional[int] = None,
     model: str = "large-v3",
     device: str = "auto",
