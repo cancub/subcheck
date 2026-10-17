@@ -15,6 +15,7 @@ from subcheck.embedded import (
     SubtitleStream,
     choose_subtitle_stream,
     extract_subtitle_stream,
+    matches_language,
     probe_subtitle_streams,
     remux_with_subtitles,
     select_subtitle_stream,
@@ -78,13 +79,31 @@ def test_probe_finds_embedded_stream(tmp_path):
     assert "eng" in st.desc
 
 
+def test_matches_language():
+    assert matches_language("eng", "en") is True
+    assert matches_language("en", "eng") is True
+    assert matches_language("en-US", "en") is True
+    assert matches_language("fre", "fr") is True
+    assert matches_language("spa", "es") is True
+    assert matches_language("deu", "de") is True
+    assert matches_language("ger", "de") is True
+    assert matches_language("eng", "de") is False
+    assert matches_language("", "en") is False
+    assert matches_language("und", "en") is False
+
+
 def test_select_by_index_language_default(tmp_path):
     video, _ = _make_video_with_subs(tmp_path)
     streams = probe_subtitle_streams(video)
-    st = select_subtitle_stream(streams, language="eng")
-    assert st.index == streams[0].index
+    # stream language is 'eng', should match 'eng' and 2-letter 'en'
+    st_eng = select_subtitle_stream(streams, language="eng")
+    assert st_eng.index == streams[0].index
+    st_en = select_subtitle_stream(streams, language="en")
+    assert st_en.index == streams[0].index
     with pytest.raises(ValueError):
         select_subtitle_stream(streams, language="deu")
+    with pytest.raises(ValueError):
+        select_subtitle_stream(streams, language="de")
     with pytest.raises(ValueError):
         select_subtitle_stream(streams, index=9)
 

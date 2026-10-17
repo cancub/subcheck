@@ -572,6 +572,8 @@ def build_autosub_parser() -> argparse.ArgumentParser:
                    help="ignore cached search results and cached files "
                         "(re-query/re-download; use when a previous pull "
                         "didn't work)")
+    p.add_argument("--skip-embedded", action="store_true",
+                   help="do not check embedded subtitle streams; always search OpenSubtitles")
     p.add_argument("--title", default=None,
                    help="override the title derived from the file name")
     p.add_argument("--season", type=int, default=None, metavar="N",
@@ -624,6 +626,7 @@ def run_autosub_cli(args) -> "AutoSubResult":
         language=args.language,
         limit=args.limit,
         refresh=args.refresh,
+        skip_embedded=getattr(args, "skip_embedded", False),
         title=args.title,
         season=args.season,
         episode=args.episode,

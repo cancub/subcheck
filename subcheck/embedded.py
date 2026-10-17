@@ -15,7 +15,7 @@ import json
 import os
 import sys
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from .tools import ToolError, resolve_binary, run_tool
 
@@ -108,6 +108,76 @@ def probe_subtitle_streams(media: str, ffprobe: Optional[str] = None) -> List[Su
     return streams
 
 
+# ISO 639-1 (2-letter) <-> ISO 639-2 (3-letter) mapping for language matching
+_ISO_639_MAP = {
+    "en": {"en", "eng"},
+    "fr": {"fr", "fra", "fre"},
+    "es": {"es", "spa"},
+    "de": {"de", "deu", "ger"},
+    "it": {"it", "ita"},
+    "pt": {"pt", "por"},
+    "nl": {"nl", "nld", "dut"},
+    "ru": {"ru", "rus"},
+    "ja": {"ja", "jpn"},
+    "zh": {"zh", "zho", "chi"},
+    "ko": {"ko", "kor"},
+    "ar": {"ar", "ara"},
+    "hi": {"hi", "hin"},
+    "pl": {"pl", "pol"},
+    "tr": {"tr", "tur"},
+    "sv": {"sv", "swe"},
+    "da": {"da", "dan"},
+    "no": {"no", "nor", "nob", "nno"},
+    "fi": {"fi", "fin"},
+    "cs": {"cs", "ces", "cze"},
+    "el": {"el", "ell", "gre"},
+    "he": {"he", "heb"},
+    "hu": {"hu", "hun"},
+    "id": {"id", "ind"},
+    "ro": {"ro", "ron", "rum"},
+    "th": {"th", "tha"},
+    "uk": {"uk", "ukr"},
+    "vi": {"vi", "vie"},
+    "fa": {"fa", "fas", "per"},
+    "bg": {"bg", "bul"},
+    "hr": {"hr", "hrv"},
+    "sr": {"sr", "srp"},
+    "sk": {"sk", "slk", "slo"},
+    "sl": {"sl", "slv"},
+    "et": {"et", "est"},
+    "lv": {"lv", "lav"},
+    "lt": {"lt", "lit"},
+}
+
+_LANG_ALIASES: Dict[str, set] = {}
+for _code_set in _ISO_639_MAP.values():
+    for _c in _code_set:
+        _LANG_ALIASES[_c] = _code_set
+
+
+def matches_language(stream_lang: str, query_lang: str) -> bool:
+    """Check if stream_lang matches query_lang, bridging 2-letter and 3-letter codes."""
+    sl = (stream_lang or "").strip().lower()
+    ql = (query_lang or "").strip().lower()
+    if not sl or not ql:
+        return False
+    if sl == ql:
+        return True
+    sl_base = sl.split("-")[0].split("_")[0]
+    ql_base = ql.split("-")[0].split("_")[0]
+    if sl_base == ql_base:
+        return True
+    if sl in _LANG_ALIASES and ql in _LANG_ALIASES[sl]:
+        return True
+    if sl_base in _LANG_ALIASES and ql_base in _LANG_ALIASES[sl_base]:
+        return True
+    if len(ql) == 2 and sl.startswith(ql):
+        return True
+    if len(sl) == 2 and ql.startswith(sl):
+        return True
+    return False
+
+
 def select_subtitle_stream(
     streams: List[SubtitleStream],
     *,
@@ -131,7 +201,7 @@ def select_subtitle_stream(
     text_streams = [s for s in streams if s.text_capable]
     if language:
         for st in text_streams:
-            if st.language.lower() == language.lower():
+            if matches_language(st.language, language):
                 return st
         raise StreamSelectionError(
             f"no text subtitle stream with language {language!r} — found:\n"

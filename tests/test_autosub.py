@@ -3,6 +3,8 @@ verify-and-pick machinery are exercised with synthetic data; no OpenSubtitles
 API calls are made."""
 
 import json
+import os
+from pathlib import Path
 
 import pytest
 
@@ -258,4 +260,221 @@ def test_autosub_embed_in_place(tmp_path, monkeypatch):
     # Explicit embed_out == video without overwrite is rejected
     out, status = _embed(video, srt, "en", embed_out=video, overwrite=False)
     assert "refusing" in status
+
+
+def test_extract_embedded_candidate(tmp_path, monkeypatch):
+    from subcheck.autosub import extract_embedded_candidate
+    from subcheck.embedded import SubtitleStream
+
+    video = tmp_path / "test.mkv"
+    video.write_bytes(b"dummy")
+
+    fake_stream = SubtitleStream(index=2, codec="subrip", language="eng")
+
+    monkeypatch.setattr("subcheck.embedded.probe_subtitle_streams", lambda v: [fake_stream])
+    monkeypatch.setattr(
+        "subcheck.embedded.extract_subtitle_stream",
+        lambda v, s, out: (Path(out).write_text(SRT_A, encoding="utf-8"), out)[1],
+    )
+
+    cand = extract_embedded_candidate(str(video), "en", str(tmp_path))
+    assert cand is not None
+    assert cand.file_id == 0
+    assert "embedded stream #2 (subrip, eng)" in cand.release
+    assert cand.from_cache is True
+    assert os.path.isfile(cand.path)
+
+    # When no streams match language
+    cand_none = extract_embedded_candidate(str(video), "de", str(tmp_path))
+    assert cand_none is None
+
+
+def test_autosub_adopts_embedded_directly_without_api_call(tmp_path, monkeypatch):
+    video = tmp_path / "Show.S01E02.mkv"
+    video.write_bytes(b"dummy")
+
+    emb_srt = tmp_path / "embedded.srt"
+    emb_srt.write_text(SRT_A, encoding="utf-8")
+    emb_cand = Candidate(
+        file_id=0,
+        release="embedded stream #0 (subrip, eng)",
+        file_name="embedded_0.srt",
+        path=str(emb_srt),
+        from_cache=True,
+    )
+
+    monkeypatch.setattr("subcheck.autosub.extract_embedded_candidate", lambda *args, **kwargs: emb_cand)
+
+    def fail_fetch(*args, **kwargs):
+        pytest.fail("fetch_candidates should not be called when embedded candidate matches!")
+
+    monkeypatch.setattr("subcheck.autosub.fetch_candidates", fail_fetch)
+
+    # Mock compare & evaluate
+    from subcheck.runner import CompareReport
+
+    def fake_compare(*args, **kwargs):
+        return CompareReport(mode="live", records=[None] * 5, media=str(video))
+
+    def fake_eval(compare, candidates, **kwargs):
+        for c in candidates:
+            c.composite = 95.0
+            c.composite_after = 95.0
+            c.rank = 1
+        return candidates[0]
+
+    monkeypatch.setattr("subcheck.autosub.run_compare", fake_compare)
+    monkeypatch.setattr("subcheck.autosub.evaluate_and_pick", fake_eval)
+    monkeypatch.setattr("subcheck.autosub._embed", lambda *args, **kwargs: ("out.mkv", "ok"))
+
+    res = run_autosub(str(video), language="en", workdir=str(tmp_path / "work"))
+    assert res.error == ""
+    assert res.chosen is emb_cand
+    assert res.chosen.file_id == 0
+    assert res.downloads_new == 0
+    assert any("using embedded subtitle stream" in note for note in res.notes)
+    assert any("skipped OpenSubtitles search" in note for note in res.notes)
+
+
+def test_autosub_falls_back_to_opensubtitles_when_embedded_scores_low(tmp_path, monkeypatch):
+    video = tmp_path / "Show.S01E02.mkv"
+    video.write_bytes(b"dummy")
+
+    emb_srt = tmp_path / "embedded.srt"
+    emb_srt.write_text(SRT_A, encoding="utf-8")
+    emb_cand = Candidate(
+        file_id=0,
+        release="embedded stream #0",
+        file_name="embedded_0.srt",
+        path=str(emb_srt),
+        from_cache=True,
+    )
+
+    os_srt = tmp_path / "os.srt"
+    os_srt.write_text(SRT_A, encoding="utf-8")
+    os_cand = Candidate(
+        file_id=999,
+        release="OpenSubtitles Release",
+        file_name="os.srt",
+        path=str(os_srt),
+        from_cache=False,
+    )
+
+    monkeypatch.setattr("subcheck.autosub.extract_embedded_candidate", lambda *args, **kwargs: emb_cand)
+    monkeypatch.setattr(
+        "subcheck.autosub.fetch_candidates",
+        lambda *args, **kwargs: ([os_cand], {"remaining_downloads": 10}, 1, 0),
+    )
+
+    from subcheck.runner import CompareReport
+
+    def fake_compare(*args, **kwargs):
+        return CompareReport(mode="live", records=[None] * 5, media=str(video))
+
+    eval_count = 0
+
+    def fake_eval(compare, candidates, **kwargs):
+        nonlocal eval_count
+        eval_count += 1
+        if eval_count == 1:
+            # First eval on embedded only: low score 50%
+            candidates[0].composite = 50.0
+            candidates[0].composite_after = 50.0
+            candidates[0].rank = 1
+            return candidates[0]
+        # Second eval on both: os_cand wins
+        for c in candidates:
+            if c.file_id == 0:
+                c.composite = 50.0
+                c.composite_after = 50.0
+                c.rank = 2
+            else:
+                c.composite = 98.0
+                c.composite_after = 98.0
+                c.rank = 1
+        return os_cand
+
+    monkeypatch.setattr("subcheck.autosub.run_compare", fake_compare)
+    monkeypatch.setattr("subcheck.autosub.score_subtitle_file", lambda *args, **kwargs: None)
+    monkeypatch.setattr("subcheck.autosub.evaluate_and_pick", fake_eval)
+    monkeypatch.setattr("subcheck.autosub._embed", lambda *args, **kwargs: ("out.mkv", "ok"))
+
+    res = run_autosub(str(video), language="en", workdir=str(tmp_path / "work"))
+    assert res.error == ""
+    assert res.chosen is os_cand
+    assert res.chosen.file_id == 999
+    assert len(res.candidates) == 2
+    assert any("falling back to OpenSubtitles" in note for note in res.notes)
+
+
+def test_autosub_skip_embedded_and_refresh(tmp_path, monkeypatch):
+    video = tmp_path / "Show.S01E02.mkv"
+    video.write_bytes(b"dummy")
+
+    extracted_called = False
+
+    def fake_extract(*args, **kwargs):
+        nonlocal extracted_called
+        extracted_called = True
+        return None
+
+    monkeypatch.setattr("subcheck.autosub.extract_embedded_candidate", fake_extract)
+    monkeypatch.setattr(
+        "subcheck.autosub.fetch_candidates",
+        lambda *args, **kwargs: ([], None, 0, 0),
+    )
+
+    # When skip_embedded is True, extract_embedded_candidate is not even called
+    res = run_autosub(str(video), skip_embedded=True, workdir=str(tmp_path / "work"))
+    assert not extracted_called
+    assert res.error == "no subtitle candidates found"
+
+
+def test_autosub_refresh_searches_opensubtitles_even_if_embedded_good(tmp_path, monkeypatch):
+    video = tmp_path / "Show.S01E02.mkv"
+    video.write_bytes(b"dummy")
+
+    emb_srt = tmp_path / "embedded.srt"
+    emb_srt.write_text(SRT_A, encoding="utf-8")
+    emb_cand = Candidate(
+        file_id=0,
+        release="embedded stream #0",
+        file_name="embedded_0.srt",
+        path=str(emb_srt),
+        from_cache=True,
+    )
+
+    fetch_called = False
+
+    def fake_fetch(*args, **kwargs):
+        nonlocal fetch_called
+        fetch_called = True
+        return [], None, 0, 0
+
+    monkeypatch.setattr("subcheck.autosub.extract_embedded_candidate", lambda *args, **kwargs: emb_cand)
+    monkeypatch.setattr("subcheck.autosub.fetch_candidates", fake_fetch)
+
+    from subcheck.runner import CompareReport
+
+    monkeypatch.setattr(
+        "subcheck.autosub.run_compare",
+        lambda *args, **kwargs: CompareReport(mode="live", records=[None] * 5, media=str(video)),
+    )
+
+    def fake_eval(compare, candidates, **kwargs):
+        candidates[0].composite = 95.0
+        candidates[0].composite_after = 95.0
+        candidates[0].rank = 1
+        return candidates[0]
+
+    monkeypatch.setattr("subcheck.autosub.evaluate_and_pick", fake_eval)
+    monkeypatch.setattr("subcheck.autosub._embed", lambda *args, **kwargs: ("out.mkv", "ok"))
+
+    # With refresh=True, fetch_candidates MUST be called even if embedded candidate scored 95%
+    res = run_autosub(str(video), refresh=True, workdir=str(tmp_path / "work"))
+    assert fetch_called is True
+    assert res.chosen is emb_cand  # emb_cand wins since fetch returned no other candidates
+    assert any("--refresh requested" in note for note in res.notes)
+
+
 

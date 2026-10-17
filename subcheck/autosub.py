@@ -25,7 +25,13 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from . import __version__
-from .runner import CheckReport, CompareReport, run_compare, score_subtitle_file
+from .runner import (
+    CheckReport,
+    CompareEntry,
+    CompareReport,
+    run_compare,
+    score_subtitle_file,
+)
 from .srtio import shift_srt
 
 # --------------------------------------------------------------------------- #
@@ -505,7 +511,7 @@ def evaluate_and_pick(
     # fps-vs-constant), scan constant shifts and adopt whichever verifiably
     # scores best — "which candidate would be good after a common shift?".
     # Verification happens on the same windows, so a wrong guess never wins.
-    grid = [round(k * 0.5, 2) for k in range(-16, 17)]  # -8.0 ... +8.0 s
+    grid = [round(k * 0.5, 2) for k in range(-40, 41)]  # -20.0 ... +20.0 s
     for cand in candidates:
         if cand.error or cand.composite is None:
             continue
@@ -602,12 +608,47 @@ class AutoSubResult:
         }
 
 
+def extract_embedded_candidate(
+    video: str,
+    language: str,
+    workdir: str,
+) -> Optional[Candidate]:
+    """If *video* has an embedded text subtitle track matching *language*,
+    extract it to *workdir* and return a Candidate."""
+    if video.startswith(("http://", "https://")) or not os.path.isfile(video):
+        return None
+    try:
+        from .embedded import (
+            extract_subtitle_stream,
+            probe_subtitle_streams,
+            select_subtitle_stream,
+        )
+
+        streams = probe_subtitle_streams(video)
+        if not streams:
+            return None
+        stream = select_subtitle_stream(streams, language=language)
+        out_path = os.path.join(workdir, f"embedded_{stream.index}.srt")
+        extract_subtitle_stream(video, stream, out_path)
+        lang_tag = f", {stream.language}" if stream.language else ""
+        return Candidate(
+            file_id=0,
+            release=f"embedded stream #{stream.index} ({stream.codec}{lang_tag})",
+            file_name=os.path.basename(out_path),
+            path=out_path,
+            from_cache=True,
+        )
+    except Exception:
+        return None
+
+
 def run_autosub(
     video: str,
     *,
     language: str = "en",
     limit: int = 3,
     refresh: bool = False,
+    skip_embedded: bool = False,
     title: Optional[str] = None,
     season: Optional[int] = None,
     episode: Optional[int] = None,
@@ -627,9 +668,9 @@ def run_autosub(
     expand_numbers: bool = True,
     overwrite: bool = False,
 ) -> AutoSubResult:
-    """Full E2E: fetch candidates -> compare against the video's audio ->
-    pick the best (fixing it when the drift diagnosis suggests so) -> embed
-    it into a copy of the video when possible."""
+    """Full E2E: check embedded subtitles -> fetch OpenSubtitles candidates ->
+    compare against the video's audio -> pick the best (fixing it when the drift
+    diagnosis suggests so) -> embed it into a copy of the video when possible."""
     meta = parse_video_name(video)
     if title:
         meta["title"] = title
@@ -653,56 +694,135 @@ def run_autosub(
 
     result = AutoSubResult(video=video, meta=meta, language=language, limit=limit)
     try:
-        candidates, quota, downloads_new, cache_hits = fetch_candidates(
-            video, meta, language=language, limit=limit, refresh=refresh,
-            workdir=base,
-        )
-        result.candidates = candidates
-        result.quota = quota
-        result.downloads_new = downloads_new
-        result.cache_hits = cache_hits
-        broken = [c for c in candidates if c.error]
-        ok = [c for c in candidates if not c.error]
-        if not candidates:
-            result.error = "no subtitle candidates found"
-            return result
-        result.notes.append(
-            f"fetched {len(ok)} candidate(s)"
-            + (f"; {len(broken)} failed ({broken[0].error}" if broken else "")
-            + (")" if broken else "")
-        )
-        result.notes.append(
-            describe_quota(quota)
-            + (f" — {downloads_new} downloaded, {cache_hits} from cache"
-               if downloads_new or cache_hits else "")
-        )
-        if not ok:
-            result.error = "every subtitle candidate failed to download"
-            return result
-
-        compare = run_compare(
-            [c.path for c in ok],
-            media=video,
-            snippets=snippets,
-            duration=duration,
-            min_gap=min_gap,
-            seed=seed,
-            model=model,
-            device=device,
-            compute_type=compute_type,
-            download_root=download_root,
-            beam_size=beam_size,
-            expand_numbers=expand_numbers,
-        )
-        result.windows_count = compare.window_count
         variants = os.path.join(base, "variants")
         os.makedirs(variants, exist_ok=True)
-        chosen = evaluate_and_pick(compare, candidates, variants_dir=variants,
-                                   expand_numbers=expand_numbers)
-        result.chosen = chosen
+
+        embedded_cand: Optional[Candidate] = None
+        if not skip_embedded:
+            embedded_cand = extract_embedded_candidate(video, language=language, workdir=base)
+
+        compare: Optional[CompareReport] = None
+        chosen: Optional[Candidate] = None
+
+        if embedded_cand is not None:
+            compare = run_compare(
+                [embedded_cand.path],
+                media=video,
+                snippets=snippets,
+                duration=duration,
+                min_gap=min_gap,
+                seed=seed,
+                model=model,
+                device=device,
+                compute_type=compute_type,
+                download_root=download_root,
+                beam_size=beam_size,
+                expand_numbers=expand_numbers,
+            )
+            result.windows_count = compare.window_count
+            evaluate_and_pick(
+                compare,
+                [embedded_cand],
+                variants_dir=variants,
+                expand_numbers=expand_numbers,
+            )
+            if not refresh and embedded_cand.composite_after is not None and embedded_cand.composite_after >= 65.0:
+                result.candidates = [embedded_cand]
+                result.chosen = embedded_cand
+                mode_desc = (
+                    f"with {embedded_cand.best_mode} fix ({embedded_cand.best_by:+.2f}s)"
+                    if embedded_cand.best_mode != "as-is"
+                    else "as-is"
+                )
+                result.notes.append(
+                    f"using embedded subtitle stream (score: {embedded_cand.composite_after:.1f}% {mode_desc}) — skipped OpenSubtitles search"
+                )
+                chosen = embedded_cand
+
         if chosen is None:
-            result.error = "none of the candidates could be scored"
-            return result
+            if embedded_cand is not None:
+                score_str = f"{embedded_cand.composite_after:.1f}%" if embedded_cand.composite_after is not None else "0.0%"
+                if refresh:
+                    result.notes.append(
+                        f"embedded subtitles found ({score_str}), searching OpenSubtitles (--refresh requested)"
+                    )
+                else:
+                    result.notes.append(
+                        f"embedded subtitles low match ({score_str} < 65%), falling back to OpenSubtitles"
+                    )
+
+            candidates, quota, downloads_new, cache_hits = fetch_candidates(
+                video, meta, language=language, limit=limit, refresh=refresh,
+                workdir=base,
+            )
+            result.quota = quota
+            result.downloads_new = downloads_new
+            result.cache_hits = cache_hits
+            broken = [c for c in candidates if c.error]
+            ok = [c for c in candidates if not c.error]
+            if not candidates and embedded_cand is None:
+                result.error = "no subtitle candidates found"
+                return result
+            if candidates:
+                result.notes.append(
+                    f"fetched {len(ok)} candidate(s)"
+                    + (f"; {len(broken)} failed ({broken[0].error})" if broken else "")
+                )
+                if quota or downloads_new or cache_hits:
+                    result.notes.append(
+                        describe_quota(quota)
+                        + (f" — {downloads_new} downloaded, {cache_hits} from cache"
+                           if downloads_new or cache_hits else "")
+                    )
+            if not ok and embedded_cand is None:
+                result.error = "every subtitle candidate failed to download"
+                return result
+
+            all_candidates = ([embedded_cand] if embedded_cand is not None else []) + candidates
+            result.candidates = all_candidates
+
+            if compare is not None:
+                for c in ok:
+                    try:
+                        entry_report = score_subtitle_file(
+                            c.path,
+                            compare.records,
+                            media=compare.media,
+                            total_duration=compare.total_duration,
+                            snippet_duration=compare.snippet_duration,
+                            settings=compare.settings,
+                            expand_numbers=expand_numbers,
+                        )
+                        compare.entries.append(CompareEntry(subtitle=c.path, report=entry_report))
+                    except Exception as exc:
+                        compare.entries.append(CompareEntry(subtitle=c.path, error=str(exc)))
+            else:
+                compare = run_compare(
+                    [c.path for c in ok],
+                    media=video,
+                    snippets=snippets,
+                    duration=duration,
+                    min_gap=min_gap,
+                    seed=seed,
+                    model=model,
+                    device=device,
+                    compute_type=compute_type,
+                    download_root=download_root,
+                    beam_size=beam_size,
+                    expand_numbers=expand_numbers,
+                )
+                result.windows_count = compare.window_count
+
+            chosen = evaluate_and_pick(
+                compare,
+                all_candidates,
+                variants_dir=variants,
+                expand_numbers=expand_numbers,
+            )
+            result.chosen = chosen
+            if chosen is None:
+                result.error = "none of the candidates could be scored"
+                return result
 
         # persist the winner (with its fix applied) as <video-stem>.autosub.srt
         source_path = chosen.path
