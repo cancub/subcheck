@@ -332,6 +332,7 @@ class Candidate:
     drift_samples: List[float] = field(default_factory=list)
     # per-snippet drift of this candidate (median matched offset per window,
     # seconds; + = subtitles run late) — the values behind the histogram
+    stream_index: Optional[int] = None  # stream index if extracted from embedded video track
 
     def to_dict(self) -> dict:
         return {
@@ -637,6 +638,7 @@ def extract_embedded_candidate(
             file_name=os.path.basename(out_path),
             path=out_path,
             from_cache=True,
+            stream_index=stream.index,
         )
     except Exception:
         return None
@@ -824,6 +826,47 @@ def run_autosub(
                 result.error = "none of the candidates could be scored"
                 return result
 
+        is_embedded = (chosen.file_id == 0)
+        is_as_is = (
+            chosen.best_mode == "as-is"
+            and round(chosen.best_by, 3) == 0.0
+            and round(chosen.best_scale, 6) == 1.0
+        )
+        final_srt_explicit = (final_srt is not None)
+        embed_out_explicit = (
+            embed_out is not None
+            and os.path.abspath(embed_out) != os.path.abspath(video)
+        )
+
+        if is_embedded and is_as_is:
+            # Embedded subtitles are already in the container and in sync
+            if final_srt_explicit:
+                try:
+                    os.makedirs(os.path.dirname(os.path.abspath(final_srt)), exist_ok=True)
+                    shutil.copyfile(chosen.path, final_srt)
+                    result.final_srt = final_srt
+                except OSError as exc:
+                    result.error = f"could not write final subtitles: {exc}"
+                    return result
+            else:
+                result.final_srt = ""
+
+            if not embed:
+                result.embed_status = "skipped"
+            elif embed_out_explicit:
+                result.embed_out, result.embed_status = _embed(
+                    video, chosen.path, language, embed_out,
+                    overwrite=overwrite,
+                    replace_stream_index=chosen.stream_index,
+                )
+            else:
+                result.embed_out = video
+                result.embed_status = "already in sync (no remux needed)"
+                result.notes.append(
+                    "embedded subtitles are already in sync — no remux or sidecar needed"
+                )
+            return result
+
         # persist the winner (with its fix applied) as <video-stem>.autosub.srt
         source_path = chosen.path
         if chosen.best_mode != "as-is":
@@ -847,8 +890,15 @@ def run_autosub(
         result.final_srt = final_srt
 
         if embed:
+            replace_idx = (
+                chosen.stream_index
+                if chosen.stream_index is not None
+                else (embedded_cand.stream_index if embedded_cand else None)
+            )
             result.embed_out, result.embed_status = _embed(
-                video, final_srt, language, embed_out, overwrite=overwrite
+                video, final_srt, language, embed_out,
+                overwrite=overwrite,
+                replace_stream_index=replace_idx,
             )
         else:
             result.embed_status = "skipped"
@@ -858,10 +908,15 @@ def run_autosub(
             shutil.rmtree(cleanup, ignore_errors=True)
 
 
-def _embed(video: str, srt_path: str, language: str,
-           embed_out: Optional[str],
-           overwrite: bool = False) -> "tuple[str, str]":
-    from .embedded import remux_with_subtitles
+def _embed(
+    video: str,
+    srt_path: str,
+    language: str,
+    embed_out: Optional[str],
+    overwrite: bool = False,
+    replace_stream_index: Optional[int] = None,
+) -> "tuple[str, str]":
+    from .embedded import normalize_container_lang, remux_with_subtitles
 
     if video.startswith(("http://", "https://")):
         return "", "skipped (remote video — no local container to remux)"
@@ -877,10 +932,14 @@ def _embed(video: str, srt_path: str, language: str,
                                      stem + ".autosub" + ext)
     if os.path.abspath(embed_out) == os.path.abspath(video) and not overwrite:
         return "", "skipped (refusing to overwrite the source video — use --in-place / --overwrite)"
+    container_lang = normalize_container_lang(language, ext)
     try:
-        remux_with_subtitles(video, srt_path, embed_out,
-                             language=language,
-                             title=f"{language} (autosub)")
+        remux_with_subtitles(
+            video, srt_path, embed_out,
+            language=container_lang or language,
+            title=f"{container_lang or language} (autosub)",
+            replace_stream_index=replace_stream_index,
+        )
         return embed_out, "ok"
     except Exception as exc:  # noqa: BLE001 - report, don't abort
         return "", f"failed ({exc})"

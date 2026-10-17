@@ -325,6 +325,32 @@ _REMUX_CODEC_BY_EXT = {
 }
 
 
+_ISO_639_TO_3 = {
+    "en": "eng", "fr": "fre", "es": "spa", "de": "ger", "it": "ita",
+    "pt": "por", "nl": "dut", "ru": "rus", "ja": "jpn", "zh": "chi",
+    "ko": "kor", "ar": "ara", "hi": "hin", "pl": "pol", "tr": "tur",
+    "sv": "swe", "da": "dan", "no": "nor", "fi": "fin", "cs": "cze",
+    "el": "gre", "he": "heb", "hu": "hun", "id": "ind", "ro": "rum",
+    "th": "tha", "uk": "ukr", "vi": "vie", "fa": "per", "bg": "bul",
+    "hr": "hrv", "sr": "srp", "sk": "slo", "sl": "slv", "et": "est",
+    "lv": "lav", "lt": "lit",
+}
+
+
+def normalize_container_lang(lang: str, container_ext: str = ".mkv") -> str:
+    """Normalize language code to 3-letter ISO 639-2 for Matroska/WebM containers."""
+    clean = (lang or "").strip().lower()
+    if not clean:
+        return ""
+    base = clean.split("-")[0].split("_")[0]
+    if container_ext in (".mkv", ".webm"):
+        if len(clean) == 3:
+            return clean
+        if base in _ISO_639_TO_3:
+            return _ISO_639_TO_3[base]
+    return clean
+
+
 def remux_with_subtitles(
     video: str,
     subtitles_srt: str,
@@ -332,12 +358,20 @@ def remux_with_subtitles(
     ffmpeg: Optional[str] = None,
     language: str = "",
     title: str = "",
+    replace_stream_index: Optional[int] = None,
 ) -> str:
-    """Copy video + audio and attach *subtitles_srt* as the only subtitle
-    track of a new container file (mkv/webm/mp4/mov...).
+    """Copy video + audio and update/attach *subtitles_srt* into the container (mkv/webm/mp4/mov...).
+
+    If the source video has existing subtitle streams, other subtitle tracks
+    are preserved rather than dropped:
+    - If *replace_stream_index* matches an existing subtitle track, that stream is
+      replaced in-place with *subtitles_srt*, retaining the other tracks.
+    - If *replace_stream_index* is omitted but an existing track matches *language*,
+      that matching track is replaced.
+    - Otherwise, existing tracks are preserved and the new subtitles are appended.
 
     No video/audio re-encoding happens (-c copy); the subtitle text is
-    re-encoded to what the container supports (srt/webvtt/mov_text).
+    encoded to what the container supports (srt/webvtt/mov_text).
     Supports in-place overwrite when out_path == video (writes to a temporary
     file in the target directory first, then atomically replaces the original).
     """
@@ -365,17 +399,74 @@ def remux_with_subtitles(
         os.close(fd)
         target_out = tmp_path
 
+    lang_to_use = normalize_container_lang(language, ext)
+
+    existing_subs: List[SubtitleStream] = []
+    if not video.startswith(("http://", "https://")) and os.path.isfile(video):
+        try:
+            existing_subs = probe_subtitle_streams(video)
+        except Exception:
+            existing_subs = []
+
+    if existing_subs and replace_stream_index is None and language:
+        for s in existing_subs:
+            if s.text_capable and matches_language(s.language, language):
+                replace_stream_index = s.index
+                break
+
     cmd = [
         binary, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
         "-i", video,
         "-i", subtitles_srt,
-        "-map", "0:v:0", "-map", "0:a?", "-map", "1:0",
-        "-c:v", "copy", "-c:a", "copy", "-c:s", codec,
+        "-map", "0:v?", "-map", "0:a?",
     ]
-    if language:
-        cmd += ["-metadata:s:s:0", f"language={language}"]
-    if title:
-        cmd += ["-metadata:s:s:0", f"title={title}"]
+    meta_args: List[str] = []
+    codec_args: List[str] = ["-c:v", "copy", "-c:a", "copy"]
+
+    if existing_subs:
+        codec_args.extend(["-c:s", "copy"])
+        out_sub_idx = 0
+        replaced_any = False
+        for s in existing_subs:
+            if ext not in (".mkv", ".webm") and not s.text_capable:
+                continue
+            if replace_stream_index is not None and s.index == replace_stream_index:
+                cmd.extend(["-map", "1:0"])
+                codec_args.extend([f"-c:s:{out_sub_idx}", codec])
+                stream_lang = lang_to_use or normalize_container_lang(s.language, ext)
+                if stream_lang:
+                    meta_args.extend([f"-metadata:s:s:{out_sub_idx}", f"language={stream_lang}"])
+                stream_title = title or s.title
+                if stream_title:
+                    meta_args.extend([f"-metadata:s:s:{out_sub_idx}", f"title={stream_title}"])
+                if s.default:
+                    meta_args.extend([f"-disposition:s:{out_sub_idx}", "default"])
+                if s.forced:
+                    meta_args.extend([f"-disposition:s:{out_sub_idx}", "forced"])
+                replaced_any = True
+            else:
+                cmd.extend(["-map", f"0:s:{s.ordinal}"])
+            out_sub_idx += 1
+
+        if not replaced_any:
+            cmd.extend(["-map", "1:0"])
+            codec_args.extend([f"-c:s:{out_sub_idx}", codec])
+            if lang_to_use:
+                meta_args.extend([f"-metadata:s:s:{out_sub_idx}", f"language={lang_to_use}"])
+            if title:
+                meta_args.extend([f"-metadata:s:s:{out_sub_idx}", f"title={title}"])
+    else:
+        cmd.extend(["-map", "1:0"])
+        codec_args.extend(["-c:s", codec])
+        if lang_to_use:
+            meta_args.extend(["-metadata:s:s:0", f"language={lang_to_use}"])
+        if title:
+            meta_args.extend(["-metadata:s:s:0", f"title={title}"])
+
+    cmd.extend(["-map", "0:t?"])  # attachments (fonts / covers)
+    cmd.extend(["-map", "0:d?"])  # data streams
+    cmd.extend(codec_args)
+    cmd.extend(meta_args)
     cmd.append(target_out)
 
     try:

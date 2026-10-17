@@ -502,6 +502,7 @@ def run_shift(args) -> dict:
                 remux_target,
                 language=stream.language,
                 title=stream.title or (stream.language.upper() if stream.language else "Subtitles"),
+                replace_stream_index=stream.index,
             )
             if in_place or os.path.abspath(remux_target) == os.path.abspath(target):
                 note += f"; updated {remux_target} in place"
@@ -709,10 +710,11 @@ def print_autosub_report(result) -> None:
             print(f"  (would only score {chosen.composite:.1f}% as-is — "
                   f"{verb} by {chosen.best_by:+.3f}s "
                   f"scale={chosen.best_scale:g}, verified on the same windows)")
-        print(f"wrote         : {result.final_srt}")
+        if result.final_srt:
+            print(f"wrote         : {result.final_srt}")
         if result.embed_status == "ok":
             print(f"embedded      : {result.embed_out}")
-        else:
+        elif result.embed_status:
             print(f"embedding     : {result.embed_status}")
 
     # per-candidate drift histograms over the shared snippets

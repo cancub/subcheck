@@ -16,6 +16,7 @@ from subcheck.embedded import (
     choose_subtitle_stream,
     extract_subtitle_stream,
     matches_language,
+    normalize_container_lang,
     probe_subtitle_streams,
     remux_with_subtitles,
     select_subtitle_stream,
@@ -310,4 +311,80 @@ def test_shift_srt_in_place(tmp_path):
     assert rc == 0
     cues = read_srt(str(srt))
     assert cues[0].start == pytest.approx(1.5, abs=0.05)
+
+
+def test_normalize_container_lang():
+    assert normalize_container_lang("en", ".mkv") == "eng"
+    assert normalize_container_lang("eng", ".mkv") == "eng"
+    assert normalize_container_lang("en-US", ".mkv") == "eng"
+    assert normalize_container_lang("fr", ".mkv") == "fre"
+    assert normalize_container_lang("es", ".mkv") == "spa"
+    assert normalize_container_lang("de", ".mkv") == "ger"
+    assert normalize_container_lang("en", ".mp4") == "en"
+    assert normalize_container_lang("", ".mkv") == ""
+
+
+def test_remux_preserves_other_subtitle_tracks(tmp_path):
+    # Create video with 2 subtitle tracks: eng (stream 2) and fre (stream 3)
+    srt_eng = tmp_path / "eng.srt"
+    srt_eng.write_text("1\n00:00:01,000 --> 00:00:02,000\nHello English\n", encoding="utf-8")
+    srt_fre = tmp_path / "fre.srt"
+    srt_fre.write_text("1\n00:00:01,000 --> 00:00:02,000\nBonjour French\n", encoding="utf-8")
+    video = tmp_path / "multi.mkv"
+
+    subprocess.run(
+        [
+            _ffmpeg(), "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+            "-f", "lavfi", "-i", "color=c=black:s=64x64:d=5",
+            "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono",
+            "-i", str(srt_eng), "-i", str(srt_fre),
+            "-map", "0:v", "-map", "1:a", "-map", "2:0", "-map", "3:0",
+            "-c:v", "mpeg4", "-c:a", "pcm_s16le", "-c:s", "srt",
+            "-metadata:s:s:0", "language=eng", "-metadata:s:s:0", "title=English SDH",
+            "-metadata:s:s:1", "language=fre", "-metadata:s:s:1", "title=French",
+            "-disposition:s:0", "default",
+            "-t", "5", str(video),
+        ],
+        check=True,
+    )
+
+    initial_streams = probe_subtitle_streams(str(video))
+    assert len(initial_streams) == 2
+    assert initial_streams[0].language == "eng"
+    assert initial_streams[1].language == "fre"
+
+    # Replace the english track with a new SRT
+    new_eng_srt = tmp_path / "fixed_eng.srt"
+    new_eng_srt.write_text("1\n00:00:02,000 --> 00:00:04,000\nFixed English\n", encoding="utf-8")
+    out_video = tmp_path / "remuxed.mkv"
+
+    remux_with_subtitles(
+        str(video),
+        str(new_eng_srt),
+        str(out_video),
+        language="en",
+        title="English Fixed",
+        replace_stream_index=initial_streams[0].index,
+    )
+
+    out_streams = probe_subtitle_streams(str(out_video))
+    # Both tracks must be preserved!
+    assert len(out_streams) == 2
+    # Stream 0: English, updated with 3-letter code 'eng'
+    assert out_streams[0].language == "eng"
+    assert out_streams[0].title == "English Fixed"
+    assert out_streams[0].default is True
+    # Stream 1: French, preserved intact
+    assert out_streams[1].language == "fre"
+    assert out_streams[1].title == "French"
+
+    # Verify extracted content
+    ext_eng = tmp_path / "ext_eng.srt"
+    extract_subtitle_stream(str(out_video), out_streams[0], str(ext_eng))
+    assert "Fixed English" in read_srt(str(ext_eng))[0].text
+
+    ext_fre = tmp_path / "ext_fre.srt"
+    extract_subtitle_stream(str(out_video), out_streams[1], str(ext_fre))
+    assert "Bonjour French" in read_srt(str(ext_fre))[0].text
+
 

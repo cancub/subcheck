@@ -237,8 +237,8 @@ def test_autosub_embed_in_place(tmp_path, monkeypatch):
 
     recorded = []
 
-    def fake_remux(video, srt_path, out_path, language="", title=""):
-        recorded.append((video, srt_path, out_path, language, title))
+    def fake_remux(video, srt_path, out_path, language="", title="", replace_stream_index=None):
+        recorded.append((video, srt_path, out_path, language, title, replace_stream_index))
         return out_path
 
     monkeypatch.setattr("subcheck.embedded.remux_with_subtitles", fake_remux)
@@ -323,17 +323,27 @@ def test_autosub_adopts_embedded_directly_without_api_call(tmp_path, monkeypatch
             c.rank = 1
         return candidates[0]
 
+    def fail_embed(*args, **kwargs):
+        pytest.fail("_embed should not be called when embedded subtitles are already in sync!")
+
     monkeypatch.setattr("subcheck.autosub.run_compare", fake_compare)
     monkeypatch.setattr("subcheck.autosub.evaluate_and_pick", fake_eval)
-    monkeypatch.setattr("subcheck.autosub._embed", lambda *args, **kwargs: ("out.mkv", "ok"))
+    monkeypatch.setattr("subcheck.autosub._embed", fail_embed)
 
     res = run_autosub(str(video), language="en", workdir=str(tmp_path / "work"))
     assert res.error == ""
     assert res.chosen is emb_cand
     assert res.chosen.file_id == 0
     assert res.downloads_new == 0
+    # No redundant sidecar .srt created
+    assert res.final_srt == ""
+    assert not (tmp_path / "Show.S01E02.autosub.srt").exists()
+    # No redundant remuxing
+    assert res.embed_status == "already in sync (no remux needed)"
+    assert not (tmp_path / "Show.S01E02.autosub.mkv").exists()
     assert any("using embedded subtitle stream" in note for note in res.notes)
     assert any("skipped OpenSubtitles search" in note for note in res.notes)
+    assert any("already in sync — no remux or sidecar needed" in note for note in res.notes)
 
 
 def test_autosub_falls_back_to_opensubtitles_when_embedded_scores_low(tmp_path, monkeypatch):
