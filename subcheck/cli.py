@@ -472,7 +472,13 @@ def run_shift(args) -> dict:
             note += (f" ({text_n} text streams available — use --sub-stream or "
                      "--sub-language to pick another)")
         if args.remux:
-            remux_with_subtitles(target, out, args.remux)
+            remux_with_subtitles(
+                target,
+                out,
+                args.remux,
+                language=stream.language,
+                title=stream.title or (stream.language.upper() if stream.language else "Subtitles"),
+            )
             note += f"; remuxed into {args.remux}"
         return {"out": out, "clamped": clamped, "note": note}
     finally:
