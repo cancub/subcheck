@@ -240,19 +240,27 @@ def run_compare_cli(args) -> "CompareReport":
     )
 
 
-def _drift_short(entry) -> str:
+def _drift_raw(entry) -> str:
+    """Raw drift facts for a compare row: mean±std in seconds."""
     ds = entry.report.drift_summary
-    if ds is None:
-        return "-"
-    if ds.category == "good":
-        return "good"
-    if ds.category == "consistent":
-        return f"consistent {ds.mean:+.2f}s"
-    if ds.category == "fps":
-        return f"bad fps ({abs(ds.rate_delta_pct or 0.0):.2f}%/s)"
-    if ds.matched_lines == 0:
-        return "bad (no matches)"
-    return "bad (inconsistent)"
+    if ds is None or ds.matched_lines == 0:
+        return "no match"
+    if ds.mean is None:
+        return "no match"
+    return f"{ds.mean:+.2f}±{ds.std:.2f}s"
+
+
+def _mean_std(values: List[float]):
+    """(mean, sample std) of drift samples; std 0 for a single value."""
+    if not values:
+        return None, None
+    mean = sum(values) / len(values)
+    if len(values) > 1:
+        var = sum((v - mean) ** 2 for v in values) / (len(values) - 1)
+        std = var ** 0.5
+    else:
+        std = 0.0
+    return mean, std
 
 
 def print_compare_report(report) -> None:
@@ -272,7 +280,8 @@ def print_compare_report(report) -> None:
     print(f"at             : {starts}")
 
     print("-" * 78)
-    print(f"{'rank':>4}  {'subtitle':<34} {'text':>8} {'IoU':>8} {'score':>8}  drift")
+    print(f"{'rank':>4}  {'subtitle':<34} {'text':>8} {'IoU':>8} {'score':>8} "
+          f"{'drift mean±std':>15}")
     print("-" * 78)
     for entry in report.entries:
         if entry.report is None:
@@ -284,12 +293,13 @@ def print_compare_report(report) -> None:
         if len(name) > 34:
             name = name[:31] + "..."
         rank = "-" if entry.rank is None else f"#{entry.rank}"
-        drift = _drift_short(entry)
+        drift = _drift_raw(entry)
         print(
             f"{rank:>4}  {name:<34}"
             f" {_fmt_pct(s.get('text_accuracy_mean')):>8}"
             f" {_fmt_pct(s.get('iou_mean')):>8}"
-            f" {_fmt_pct(s.get('composite_mean')):>8}  {drift}"
+            f" {_fmt_pct(s.get('composite_mean')):>8}"
+            f" {drift:>15}"
         )
     print("-" * 78)
 
@@ -332,7 +342,10 @@ def print_compare_report(report) -> None:
             name = os.path.basename(e.subtitle)
             if len(name) > 60:
                 name = name[:57] + "..."
-            print(f"  #{e.rank} {name} (n={len(samples)}):")
+            mean, std = _mean_std(samples)
+            stats = (f"mean {mean:+.2f}s, std {std:.2f}s" if mean is not None
+                     else "no data")
+            print(f"  #{e.rank} {name} — {stats}, n={len(samples)}:")
             for line in drift_histogram_lines(samples):
                 print(f"      {line.strip()}")
 
@@ -620,15 +633,15 @@ def print_autosub_report(result) -> None:
             print(f"* {note}")
         return
     if result.candidates:
-        print(f"{'rank':>4}  {'release':<40} {'cached':>6} {'before':>8} "
-              f"{'mode':<9} {'after':>8}")
+        print(f"{'rank':>4}  {'release':<38} {'cached':>6} {'before':>8} "
+              f"{'mode':<9} {'after':>8} {'drift mean±std':>15}")
         print("-" * 74)
         ranked = sorted((c for c in result.candidates if not c.error),
                         key=lambda c: (c.rank if c.rank is not None else 99))
         for c in ranked:
             name = (c.release or c.file_name) or f"file {c.file_id}"
-            if len(name) > 40:
-                name = name[:37] + "..."
+            if len(name) > 38:
+                name = name[:35] + "..."
             rank = "-" if c.rank is None else f"#{c.rank}"
             cached = "yes" if c.from_cache else "no"
             before = _fmt_pct(c.composite)
@@ -636,8 +649,10 @@ def print_autosub_report(result) -> None:
             mode = c.best_mode
             if c.best_mode != "as-is" and c.best_by:
                 mode += f" {c.best_by:+.2f}s"
-            print(f"{rank:>4}  {name:<40} {cached:>6} {before:>8} "
-                  f"{mode:<9} {after:>8}")
+            mean, std = _mean_std(c.drift_samples)
+            drift = (f"{mean:+.2f}±{std:.2f}s" if mean is not None else "no match")
+            print(f"{rank:>4}  {name:<38} {cached:>6} {before:>8} "
+                  f"{mode:<9} {after:>8} {drift:>15}")
         for c in result.candidates:
             if c.error:
                 print(f"  -   {c.file_name or c.file_id}: {c.error}")
@@ -674,10 +689,13 @@ def print_autosub_report(result) -> None:
               "(seconds, + = subtitles run late):")
         for c in with_drift:
             name = (c.release or c.file_name) or f"file {c.file_id}"
-            if len(name) > 58:
-                name = name[:55] + "..."
-            mode = f" (chosen fix: {c.best_mode})" if c.best_mode != "as-is" else ""
-            print(f"  #{c.rank} {name} (n={len(c.drift_samples)}){mode}")
+            if len(name) > 56:
+                name = name[:53] + "..."
+            mean, std = _mean_std(c.drift_samples)
+            stats = (f"mean {mean:+.2f}s, std {std:.2f}s" if mean is not None
+                     else "no data")
+            mode = f" — chosen fix: {c.best_mode}" if c.best_mode != "as-is" else ""
+            print(f"  #{c.rank} {name} — {stats}, n={len(c.drift_samples)}{mode}")
             for line in drift_histogram_lines(c.drift_samples):
                 print(f"      {line.strip()}")
 

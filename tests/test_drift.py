@@ -140,7 +140,7 @@ def test_consistent_drift_is_fixable():
     assert ds.std == pytest.approx(0.079, abs=0.01)
     # subtitles run late -> the fix shifts them earlier (negative by)
     assert ds.fix_by == pytest.approx(-ds.mean)
-    assert "late" in ds.label
+    assert "+1.10" in ds.label and "std" in ds.label  # raw numbers, no drama
 
 
 def test_consistent_early_drift_fix_sign():

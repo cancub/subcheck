@@ -462,7 +462,7 @@ def summarize_drift(
             mean=None, std=None, matched_lines=matched_lines or 0,
             matched_windows=matched_windows,
             category=CATEGORY_BAD,
-            label="bad match: no matched lines at all — nothing can be said about drift",
+            label="no matched text — drift not measurable",
             note="no speech segment could be matched to a subtitle cue",
         )
     if matched_lines is None:
@@ -508,19 +508,18 @@ def summarize_drift(
             rate_delta_pct = (1.0 / (1.0 + b) - 1.0) * 100.0
             scale = 1.0 / (1.0 + b)
             by = -a / (1.0 + b)             # exact: A = (S - a) / (1 + b)
-            direction = "fast" if b > 0 else "slow"
             note = ""
             if n < 3:
                 note = "based on only two matched windows — low confidence"
             elif sigma_b is not None and sigma_b > 0:
                 note = (
-                    f"drift grows by {b * 1000:+.2f} ms per second of movie "
+                    f"drift changes by {b * 1000:+.2f} ms per second of movie "
                     f"(slope {b:.6f}, fit noise {sigma_b:.6f})"
                 )
             label = (
-                f"bad fps: subtitle timeline runs {abs(rate_delta_pct):.2f}% "
-                f"{direction} relative to the movie — drift gets progressively "
-                "worse"
+                f"fps mismatch: drift slope {b:+.6f} s/s — subtitle timeline "
+                f"speed off by ≈{abs(rate_delta_pct):.2f}% "
+                f"({'runs fast' if b > 0 else 'runs slow'})"
             )
             return DriftSummary(
                 mean=mean, std=std, matched_lines=matched_lines,
@@ -534,13 +533,16 @@ def summarize_drift(
     # relative and absolute terms)
     if std > max(CONSISTENT_MAX_CV * abs_mean, ERRATIC_MIN_STD_S):
         note = (
-            f"std ({std:.2f}s) is large compared to the mean drift "
-            f"({mean:+.2f}s): individual lines disagree on both amount and "
-            "direction of the offset"
+            f"per-window offsets vary by more than the usual timing noise "
+            f"(std {std:.2f}s vs mean {mean:+.2f}s)"
         )
         return DriftSummary(
             mean=mean, std=std, matched_lines=matched_lines, matched_windows=matched_windows or n,
-            category=CATEGORY_BAD, label="bad match: drift is inconsistent",
+            category=CATEGORY_BAD,
+            label=(
+                f"inconsistent drift: mean {mean:+.2f}s, std {std:.2f}s "
+                "(windows disagree on the offset)"
+            ),
             note=note,
         )
 
@@ -563,7 +565,6 @@ def summarize_drift(
         )
 
     # category: a consistent, constant time offset
-    direction = "late" if mean > 0 else "early"
     note = ""
     if n < 3:
         note = f"based on only {n} window(s) — low confidence"
@@ -571,8 +572,8 @@ def summarize_drift(
         mean=mean, std=std, matched_lines=matched_lines, matched_windows=matched_windows or n,
         category=CATEGORY_CONSISTENT,
         label=(
-            f"consistent drift: subtitles run {abs_mean:.2f}s {direction} "
-            "on average (similar offset across lines)"
+            f"consistent drift: mean {mean:+.2f}s, std {std:.2f}s "
+            "(constant offset)"
         ),
         note=note,
         fix_by=-mean,

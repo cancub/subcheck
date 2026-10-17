@@ -50,12 +50,13 @@ compared — so boundary words and words describing audio outside the region do
 not distort the WER, while genuine text mismatches over the audible span
 still count.
 
-### Sync-drift flag
+### Drift output
 
-When a window scores > 90 % text accuracy but < 20 % temporal IoU, the file is
-flagged for **constant time-offset drift** (accurate text, shifted by ±N s).
-A median offset estimate (subtitle-start minus speech-start over matched
-segment/cue pairs) is reported too — positive means the subtitles run late.
+Drift is reported as raw numbers — per-window values in the ASCII histogram,
+the aggregate **mean and standard deviation** across the sampled windows, and
+a one-line classification (good / consistent / fps / no match) — plus a fix
+command only when a constant or timebase correction applies. Positive drift
+means the subtitles run late.
 
 ## Install
 
@@ -135,18 +136,16 @@ over the shared snippets, and the per-candidate values are stored in the
 The classification buckets are:
 
 * **good match** — average drift under 100 ms: nothing to fix.
-* **consistent drift** — average offset beyond 100 ms but the lines agree
-  with each other (e.g. everything ~1.0–1.2 s late). The tool prints a ready
-  fix command:
+* **consistent drift** — mean offset beyond 100 ms with a small spread
+  (constant offset). The tool prints a ready fix command:
 
   ```bash
   subcheck shift "movie.srt" --by -1.051
   ```
-* **bad fps** — drift gets *progressively worse*: a least-squares fit of
-  drift vs movie-time finds a significant slope (seconds of drift per second
-  of movie), i.e. the subtitle timeline runs at the wrong speed (classic
-  PAL/NTSC timebase mix-ups). The report shows the slope, the implied speed
-  error in % and a timebase fix:
+* **fps mismatch** — a least-squares fit of drift vs movie-time finds a
+  significant slope (seconds of drift per second of movie): the subtitle
+  timeline runs at the wrong speed (classic PAL/NTSC timebase mix-ups). The
+  report shows the slope, the implied speed error in % and a timebase fix:
 
   ```bash
   subcheck shift "movie.srt" --scale 0.999255 --by -1.192
@@ -154,10 +153,9 @@ The classification buckets are:
   (`new_t = t × --scale + --by`; here the timeline was ~0.07 % fast.)
 * **bad match** — offsets vary wildly (std large compared to the mean —
   beyond 50 % of it *and* over an absolute floor of 0.35 s, so ordinary ASR
-  boundary noise does not trigger it — lines disagree on amount *and*
-  direction) or **no line could be matched at all** (unrelated text /
-  different language / subtitles shifted so far that no cue text overlaps the
-  sampled speech).
+  boundary noise does not trigger it — windows disagree on the offset) or
+  **no line could be matched at all** (drift not measurable: no cue text
+  overlaps the sampled speech).
 
 Thresholds live at the top of `subcheck/scoring.py`
 (`GOOD_MAX_ABS_MEAN_S`, `CONSISTENT_MAX_CV`, `ERRATIC_MIN_STD_S`,
@@ -337,9 +335,9 @@ clear message — provide an external `.srt` instead.
 
 Per window: `text` accuracy, temporal `iou`, composite `score`, optional
 `drift ±s`, plus the ASR vs SRT text when they disagree. Aggregate over all
-windows, then a verdict flag. The check is **sampling-based**: it certifies
-the sampled regions, not the whole file — increase `--snippets` for more
-confidence.
+windows, then the drift classification and histogram. The check is
+**sampling-based**: it certifies the sampled regions, not the whole file —
+increase `--snippets` for more confidence.
 
 ## Validation
 
@@ -348,10 +346,10 @@ End-to-end runs on *The Prestige* (1080p rip, 2 h 10 m, ENG SRT, seed 1234,
 
 | Subtitle file under test | text acc. | IoU | composite | detected by the tool |
 |---|---|---|---|---|
-| SRT built from the ASR output itself (positive control) | 100 % | 100 % | 100 % | "looks ACCURATE" |
-| Real `dxva-BTT` ENG SRT | 65.7 % | 53.8 % | 62.7 % | "does NOT match well", consistent drift mean +1.05 s (std 0.31 s) → fix suggested |
-| Same SRT shifted +60 s (broken-sync control) | 6.7 % | 19.6 % | 9.9 % | "does NOT match well", missing-caption flags, 2 re-rolls |
-| Timeline scaled ×1.0008 (bad-fps control) | — | — | — | "bad fps": slope +0.00075 s/s (~0.07 % fast) → scale fix; after applying it: good match (mean −6 ms) |
+| SRT built from the ASR output itself (positive control) | 100 % | 100 % | 100 % | drift mean +0.00 s (good) |
+| Real `dxva-BTT` ENG SRT | 65.7 % | 53.8 % | 62.7 % | consistent drift mean +1.05 s (std 0.31 s) → fix suggested |
+| Same SRT shifted +60 s (broken-sync control) | 6.7 % | 19.6 % | 9.9 % | no matched text, missing-caption windows, 2 re-rolls |
+| Timeline scaled ×1.0008 (bad-fps control) | — | — | — | fps mismatch: slope +0.00075 s/s (~0.07 % fast) → scale fix; after applying it: drift mean −6 ms (good) |
 
 The middle row is a real finding, cross-checked by transcribing wider
 reference chunks around the sampled windows: that SRT runs ~0.8–1.4 s late

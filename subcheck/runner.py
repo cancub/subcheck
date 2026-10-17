@@ -26,11 +26,6 @@ from .slicing import extract_audio
 from .srtio import Cue, cues_overlapping, read_srt
 from .transcribe import Segment, Transcriber
 
-# text accuracy / IoU thresholds used for the constant-offset-drift flag
-DRIFT_TEXT_MIN = 90.0   # text must be this good ...
-DRIFT_IOU_MAX = 20.0    # ... while overlap is worse than this (%)
-
-
 @dataclass
 class WindowOutcome:
     """Outcome of checking one sampled window."""
@@ -621,50 +616,36 @@ def run_compare(
 
 
 def _flag_and_drift(report: CheckReport) -> None:
-    """Per-window drift suspects + global flags/verdict wording."""
+    """Per-window status notes + drift statistics flags (factual wording:
+    numbers and applicable fix commands, no judgement)."""
     scored = [o for o in report.windows if o.score and not o.rolled]
 
     rolled = sum(1 for o in report.windows if o.rolled)
     if rolled:
         report.flags.append(
-            f"{rolled} window(s) were re-rolled (subtitles present but no speech "
-            "recognised — music interludes or ASR misses)."
+            f"{rolled} window(s) were re-rolled (subtitles present, no speech "
+            "recognised)."
         )
 
     silent = [o for o in scored if o.score.status == "silent-match"]
     if silent:
         report.flags.append(
-            f"{len(silent)} window(s) had no speech and no subtitles: counted as "
-            "perfect 100 % matches (silent agreement)."
+            f"{len(silent)} window(s) had no speech and no subtitles — counted "
+            "as perfect 100 % matches."
         )
 
     missing = [o for o in scored if o.score.status == "speech-no-subs"]
     if missing:
         report.flags.append(
-            f"{len(missing)} window(s) contain speech that the subtitle file does "
-            "not caption at all — subtitle text is missing there."
+            f"{len(missing)} window(s) contain speech but no subtitle text "
+            "within the window."
         )
 
     no_speech = [o for o in scored if o.score.status == "subs-no-speech"]
     if no_speech:
         report.flags.append(
-            f"{len(no_speech)} window(s) kept where the subtitle file shows text "
-            "but no speech was recognised."
-        )
-
-    drift_suspects = [
-        o
-        for o in scored
-        if o.score.text_accuracy is not None
-        and o.score.text_accuracy > DRIFT_TEXT_MIN
-        and (o.score.iou or 0.0) * 100.0 < DRIFT_IOU_MAX
-    ]
-    if drift_suspects:
-        where = ", ".join(f"{o.snippet.start:.0f}s" for o in drift_suspects)
-        report.flags.append(
-            f"SYNC DRIFT SUSPECTED in {len(drift_suspects)} window(s) ({where}s): "
-            "text accuracy is high but temporal overlap is low — the subtitle "
-            "timing looks shifted by a constant offset."
+            f"{len(no_speech)} window(s) have subtitle text but no speech was "
+            "recognised."
         )
 
     # drift statistics over the sampled clips: each window contributes its
@@ -691,10 +672,9 @@ def _flag_and_drift(report: CheckReport) -> None:
             f'subcheck shift "{report.subtitle}" --by {drift.fix_by:.3f}'
         )
         report.flags.append(
-            f"CONSISTENT DRIFT: subtitles run "
-            f"{'late' if drift.mean > 0 else 'early'} by {abs(drift.mean):.2f}s "
-            f"on average (std {drift.std:.2f}s across {drift.matched_lines} "
-            f"matched line(s)) — a constant time shift fixes this:"
+            f"drift: mean {drift.mean:+.2f}s, std {drift.std:.2f}s "
+            f"({drift.matched_lines} matched line(s)) — constant offset; "
+            f"apply a constant shift:"
             f"\n        {report.fix_command}"
         )
     elif drift.category == CATEGORY_FPS:
@@ -703,43 +683,16 @@ def _flag_and_drift(report: CheckReport) -> None:
             f" --scale {drift.fix_scale:.6f} --by {drift.fix_by:.3f}"
         )
         report.flags.append(
-            f"BAD FPS: subtitle timeline speed does not match the movie "
-            f"(drift slope {drift.slope_s_per_s:+.6f} s per s of movie, "
-            f"timeline off by ≈{abs(drift.rate_delta_pct):.2f}%) — rescale the "
-            "subtitle times instead of shifting them:"
+            f"drift slope {drift.slope_s_per_s:+.6f} s/s of movie "
+            f"(timeline speed off by ≈{abs(drift.rate_delta_pct):.2f}%) — "
+            f"apply a timebase correction:"
             f"\n        {report.fix_command}"
         )
     elif drift.category == CATEGORY_BAD and drift.matched_lines == 0:
         report.flags.append(
-            "Drift could not be measured: no subtitle line could be textually "
-            "matched to a speech segment (unrelated text? different language?)."
+            "no matched text between the speech and the subtitles — "
+            "drift not measurable."
         )
 
-    summary = report.summary
-    if summary.get("composite_mean") is None:
-        report.flags.append("No window could be scored — nothing to conclude.")
-        return
-
-    mean = summary["composite_mean"]
-    n = summary.get("windows_scored", 0)
-    if mean >= 95:
-        verdict = (
-            f"Sampled {n} window(s): the subtitle file looks ACCURATE in the "
-            "sampled regions."
-        )
-    elif mean >= 88:
-        verdict = (
-            f"Sampled {n} window(s): subtitles look mostly accurate, with minor "
-            "text/timing deviations."
-        )
-    elif mean >= 75:
-        verdict = (
-            f"Sampled {n} window(s): subtitles deviate noticeably — text and/or "
-            "timing mismatches were found."
-        )
-    else:
-        verdict = (
-            f"Sampled {n} window(s): subtitles do NOT match the audio well — "
-            "verify the file (wrong language, wrong edition, broken sync?)."
-        )
-    report.flags.append(verdict)
+    if report.summary.get("composite_mean") is None:
+        report.flags.append("no window could be scored.")
