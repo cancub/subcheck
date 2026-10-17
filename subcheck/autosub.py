@@ -625,6 +625,7 @@ def run_autosub(
     final_srt: Optional[str] = None,
     workdir: Optional[str] = None,
     expand_numbers: bool = True,
+    overwrite: bool = False,
 ) -> AutoSubResult:
     """Full E2E: fetch candidates -> compare against the video's audio ->
     pick the best (fixing it when the drift diagnosis suggests so) -> embed
@@ -727,7 +728,7 @@ def run_autosub(
 
         if embed:
             result.embed_out, result.embed_status = _embed(
-                video, final_srt, language, embed_out
+                video, final_srt, language, embed_out, overwrite=overwrite
             )
         else:
             result.embed_status = "skipped"
@@ -738,7 +739,8 @@ def run_autosub(
 
 
 def _embed(video: str, srt_path: str, language: str,
-           embed_out: Optional[str]) -> "tuple[str, str]":
+           embed_out: Optional[str],
+           overwrite: bool = False) -> "tuple[str, str]":
     from .embedded import remux_with_subtitles
 
     if video.startswith(("http://", "https://")):
@@ -747,11 +749,14 @@ def _embed(video: str, srt_path: str, language: str,
     if embed_out is None:
         if ext not in (".mkv", ".webm", ".mp4", ".mov", ".m4v"):
             return "", f"skipped (cannot embed text subs in a {ext or '?'} container)"
-        stem = os.path.splitext(os.path.basename(video))[0]
-        embed_out = os.path.join(os.path.dirname(os.path.abspath(video)),
-                                 stem + ".autosub" + ext)
-    if os.path.abspath(embed_out) == os.path.abspath(video):
-        return "", "skipped (refusing to overwrite the source video — use --embed-out)"
+        if overwrite:
+            embed_out = video
+        else:
+            stem = os.path.splitext(os.path.basename(video))[0]
+            embed_out = os.path.join(os.path.dirname(os.path.abspath(video)),
+                                     stem + ".autosub" + ext)
+    if os.path.abspath(embed_out) == os.path.abspath(video) and not overwrite:
+        return "", "skipped (refusing to overwrite the source video — use --in-place / --overwrite)"
     try:
         remux_with_subtitles(video, srt_path, embed_out,
                              language=language,

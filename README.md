@@ -200,8 +200,10 @@ subcheck shift "movie.srt" --scale 0.999255 --by -1.192
 The two options combine in one command (scale is applied first, then the
 shift) and each defaults to a no-op, so either can be used alone. Output
 defaults to `<name>.fixed.srt` next to the input (`--out PATH` to choose);
-cue times that would become negative are clamped to zero. Verify the fix by
-re-scoring the result (below).
+with `--in-place` (`-i`, `--overwrite`), the file is updated in place
+(an `.srt` file is overwritten directly; for a video container like `.mkv`,
+the subtitles are remuxed in place using a safe atomic replace). Verify the fix
+by re-scoring the result (below).
 
 ### Comparing subtitle files — `subcheck compare`
 
@@ -273,8 +275,10 @@ How it works:
    in.
 4. **Embed** — the corrected track is muxed into a *copy* of the video
    (`<video>.autosub.mkv`, lossless `-c copy` video/audio; mkv/webm/mp4/mov
-   supported). Skipped with `--no-embed`; not possible for remote files or
-   unsupported containers — the `.srt` is still written.
+   supported). Use `--in-place` (`-i`, `--overwrite`) to safely overwrite
+   the source video in place instead of creating a copy. Skipped with
+   `--no-embed`; not possible for remote files or unsupported containers —
+   the `.srt` is still written.
 
 Requires the `opensubtitlescom` package for live searches/downloads
 (`pip install -e ".[autosub]"`); all cache/verification logic works offline.

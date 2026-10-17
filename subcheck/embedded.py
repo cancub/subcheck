@@ -268,7 +268,11 @@ def remux_with_subtitles(
 
     No video/audio re-encoding happens (-c copy); the subtitle text is
     re-encoded to what the container supports (srt/webvtt/mov_text).
+    Supports in-place overwrite when out_path == video (writes to a temporary
+    file in the target directory first, then atomically replaces the original).
     """
+    import tempfile
+
     binary = ffmpeg or resolve_binary("ffmpeg")
     ext = os.path.splitext(out_path)[1].lower()
     codec = _REMUX_CODEC_BY_EXT.get(ext)
@@ -277,6 +281,20 @@ def remux_with_subtitles(
             f"cannot remux subtitles into a .{ext or '?'} container — use "
             ".mkv, .webm, .mp4 or .mov output"
         )
+
+    in_place = os.path.abspath(out_path) == os.path.abspath(video)
+    target_out = out_path
+    tmp_path = None
+    if in_place:
+        dir_name = os.path.dirname(os.path.abspath(out_path)) or "."
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=".subcheck-remux-",
+            suffix=ext,
+            dir=dir_name,
+        )
+        os.close(fd)
+        target_out = tmp_path
+
     cmd = [
         binary, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
         "-i", video,
@@ -288,6 +306,18 @@ def remux_with_subtitles(
         cmd += ["-metadata:s:s:0", f"language={language}"]
     if title:
         cmd += ["-metadata:s:s:0", f"title={title}"]
-    cmd.append(out_path)
-    run_tool(cmd)
+    cmd.append(target_out)
+
+    try:
+        run_tool(cmd)
+        if in_place and tmp_path:
+            os.replace(tmp_path, out_path)
+    except Exception:
+        if in_place and tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+        raise
+
     return out_path

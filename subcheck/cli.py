@@ -405,6 +405,10 @@ def build_shift_parser() -> argparse.ArgumentParser:
     p.add_argument("--remux", default=None, metavar="OUT.mkv",
                    help="when fixing a video, also mux the corrected subtitles "
                         "into a copy of the video (mkv/webm)")
+    p.add_argument("--in-place", "-i", "--overwrite", action="store_true",
+                   dest="in_place",
+                   help="overwrite the original file in place with the updated subtitles "
+                        "(rewrites the .srt file directly, or remuxes the video file in place)")
     p.add_argument("--out", default=None,
                    help="output SRT path (default: <name>.fixed.srt next to the "
                         "input)")
@@ -436,11 +440,14 @@ def run_shift(args) -> dict:
     import pysrt  # noqa: F401  (validates the file below)
 
     target = args.subtitle
+    in_place = getattr(args, "in_place", False)
     out = args.out
-    if out is None:
-        out = _default_fixed_path(target)
 
     if target.lower().endswith(".srt"):
+        if in_place:
+            out = target
+        elif out is None:
+            out = _default_fixed_path(target)
         return {"out": out, "clamped": _transform_srt(target, out, args.by, args.scale),
                 "note": ""}
 
@@ -461,26 +468,46 @@ def run_shift(args) -> dict:
     stream = choose_subtitle_stream(
         streams, index=args.sub_stream, language=args.sub_language
     )
+    remux_target = args.remux
+    if in_place:
+        remux_target = target
+
     tmpdir = tempfile.mkdtemp(prefix="subcheck-embed-")
     try:
         raw = os.path.join(tmpdir, "embedded.srt")
         extract_subtitle_stream(target, stream, raw)
-        clamped = _transform_srt(raw, out, args.by, args.scale)
+
+        # When overwriting in place and no explicit --out was requested,
+        # write the shifted srt inside tmpdir so no unwanted sidecar is left behind.
+        if in_place and out is None:
+            shift_out = os.path.join(tmpdir, "fixed.srt")
+            clamped = _transform_srt(raw, shift_out, args.by, args.scale)
+            reported_out = target
+        else:
+            if out is None:
+                out = _default_fixed_path(target)
+            clamped = _transform_srt(raw, out, args.by, args.scale)
+            shift_out = out
+            reported_out = out
+
         text_n = sum(1 for s in streams if s.text_capable)
         note = f"using embedded {stream.desc}"
         if text_n > 1:
             note += (f" ({text_n} text streams available — use --sub-stream or "
                      "--sub-language to pick another)")
-        if args.remux:
+        if remux_target:
             remux_with_subtitles(
                 target,
-                out,
-                args.remux,
+                shift_out,
+                remux_target,
                 language=stream.language,
                 title=stream.title or (stream.language.upper() if stream.language else "Subtitles"),
             )
-            note += f"; remuxed into {args.remux}"
-        return {"out": out, "clamped": clamped, "note": note}
+            if in_place or os.path.abspath(remux_target) == os.path.abspath(target):
+                note += f"; updated {remux_target} in place"
+            else:
+                note += f"; remuxed into {remux_target}"
+        return {"out": reported_out, "clamped": clamped, "note": note}
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -553,6 +580,9 @@ def build_autosub_parser() -> argparse.ArgumentParser:
                    help="override the episode number")
     p.add_argument("--no-embed", action="store_true",
                    help="do not remux the winning subtitles into the video")
+    p.add_argument("--in-place", "-i", "--overwrite", action="store_true",
+                   dest="in_place",
+                   help="overwrite the original video file in place with the winning subtitles")
     p.add_argument("--embed-out", default=None, metavar="PATH",
                    help="output video path for the embedded copy "
                         "(default: <video>.autosub.<ext> next to the source)")
@@ -611,6 +641,7 @@ def run_autosub_cli(args) -> "AutoSubResult":
         final_srt=args.out_srt,
         workdir=args.workdir,
         expand_numbers=not args.no_expand_numbers,
+        overwrite=getattr(args, "in_place", False),
     )
 
 

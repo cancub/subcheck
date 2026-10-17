@@ -228,3 +228,34 @@ def test_autosub_offline_e2e_without_video_errors_cleanly(tmp_path, monkeypatch)
             title="Demo", season=1, episode=2, embed=False,
             workdir=str(tmp_path / "work"),
         )
+
+
+def test_autosub_embed_in_place(tmp_path, monkeypatch):
+    from subcheck.autosub import _embed
+
+    recorded = []
+
+    def fake_remux(video, srt_path, out_path, language="", title=""):
+        recorded.append((video, srt_path, out_path, language, title))
+        return out_path
+
+    monkeypatch.setattr("subcheck.embedded.remux_with_subtitles", fake_remux)
+
+    video = str(tmp_path / "movie.mkv")
+    srt = str(tmp_path / "subs.srt")
+
+    # Without overwrite, default is <video>.autosub.mkv
+    out, status = _embed(video, srt, "en", embed_out=None, overwrite=False)
+    assert status == "ok"
+    assert out.endswith("movie.autosub.mkv")
+
+    # With overwrite, default is movie.mkv itself
+    out, status = _embed(video, srt, "en", embed_out=None, overwrite=True)
+    assert status == "ok"
+    assert out == video
+    assert recorded[-1][0] == video and recorded[-1][2] == video
+
+    # Explicit embed_out == video without overwrite is rejected
+    out, status = _embed(video, srt, "en", embed_out=video, overwrite=False)
+    assert "refusing" in status
+

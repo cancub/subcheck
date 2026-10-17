@@ -251,3 +251,44 @@ def test_shift_rejects_file_without_subtitles(tmp_path, capsys):
     rc = cli.main(["shift", str(tmp_path / "plain.txt"), "--by", "1.0"])
     assert rc == 1
     assert "error" in capsys.readouterr().err
+
+
+def test_remux_with_subtitles_in_place(tmp_path):
+    video, srt = _make_video_with_subs(tmp_path)
+    new_srt = tmp_path / "new.srt"
+    new_srt.write_text("1\n00:00:03,000 --> 00:00:05,000\nIn-place updated text.\n", encoding="utf-8")
+    res = remux_with_subtitles(video, str(new_srt), video, language="eng", title="English")
+    assert res == video
+    extracted = tmp_path / "extracted.srt"
+    stream = probe_subtitle_streams(video)[0]
+    extract_subtitle_stream(video, stream, str(extracted))
+    cues = read_srt(str(extracted))
+    assert len(cues) == 1
+    assert cues[0].start == pytest.approx(3.0, abs=0.05)
+    assert "In-place updated text." in cues[0].text
+
+
+def test_shift_video_in_place(tmp_path):
+    video, _ = _make_video_with_subs(tmp_path)
+    # shift by 2.0s in place
+    rc = cli.main(["shift", video, "--by", "2.0", "--in-place"])
+    assert rc == 0
+    # verify no unwanted sidecar .srt was created
+    assert not (tmp_path / "sample.fixed.srt").exists()
+    # verify embedded subtitles inside the video were shifted
+    extracted = tmp_path / "check.srt"
+    stream = probe_subtitle_streams(video)[0]
+    extract_subtitle_stream(video, stream, str(extracted))
+    cues = read_srt(str(extracted))
+    assert cues[0].start == pytest.approx(2.5, abs=0.05)
+    assert cues[1].start == pytest.approx(4.5, abs=0.05)
+
+
+def test_shift_srt_in_place(tmp_path):
+    srt = tmp_path / "test.srt"
+    srt.write_text(SRT_CONTENT, encoding="utf-8")
+    rc = cli.main(["shift", str(srt), "--by", "1.0", "-i"])
+    assert rc == 0
+    cues = read_srt(str(srt))
+    assert cues[0].start == pytest.approx(1.5, abs=0.05)
+
