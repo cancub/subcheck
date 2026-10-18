@@ -58,37 +58,79 @@ a one-line classification (good / consistent / fps / no match) — plus a fix
 command only when a constant or timebase correction applies. Positive drift
 means the subtitles run late.
 
+## System Prerequisites
+
+1. **FFmpeg**: `ffmpeg` and `ffprobe` must be installed and on `PATH`.
+   - Ubuntu / Debian: `sudo apt update && sudo apt install -y ffmpeg`
+   - Arch Linux: `sudo pacman -S ffmpeg`
+   - macOS (Homebrew): `brew install ffmpeg`
+   - Custom / static builds: set `SUBCHECK_FFMPEG_BIN` and `SUBCHECK_FFPROBE_BIN` environment variables.
+
+2. **NVIDIA Driver (GPU only)**:
+   - For GPU acceleration via CUDA 12, an NVIDIA GPU with driver ≥ 525 (recommended ≥ 550) is required.
+   - Verify with: `nvidia-smi`
+
 ## Install
 
 ```bash
 python -m venv .venv && . .venv/bin/activate
-pip install -e .            # or: pip install -r requirements.txt
-pip install -e ".[autosub]"   # extra: OpenSubtitles access for `autosub`
+
+# Base install (CPU inference):
+pip install -e .
+
+# With GPU (CUDA 12) support:
+pip install -e ".[cuda]"
+
+# With OpenSubtitles support for `autosub`:
+pip install -e ".[autosub]"
+
+# Or install all features (GPU + autosub):
+pip install -e ".[all]"
 ```
 
-`ffmpeg`/`ffprobe` must be on `PATH` (or point at a static build — used in
-this repo's tests — via `SUBCHECK_FFMPEG_BIN` / `SUBCHECK_FFPROBE_BIN`).
-Model weights download automatically from Hugging Face on first run into the
-HF cache (`$HF_HOME`, or `--model-dir`).
+### GPU (CUDA 12) Setup & Verification
 
-### GPU (CUDA) — e.g. a GTX 4070 Ti
+`ctranslate2` requires cuBLAS 12 and cuDNN 9 runtimes. Installing `subcheck[cuda]` supplies these packages (`nvidia-cublas-cu12` and `nvidia-cudnn-cu12`).
 
-`ctranslate2` needs cuBLAS 12 + cuDNN 9 (see the
-[faster-whisper README](https://github.com/SYSTRAN/faster-whisper)); the pip
-packages work well on Linux:
+`subcheck` automatically discovers and preloads these libraries into memory when running inside your virtual environment, so no manual library path configuration is usually necessary.
+
+If you are running external scripts or tools in your shell that directly import `ctranslate2`, you can export their paths to `LD_LIBRARY_PATH` (note: Python 3.12-safe via `__path__[0]`):
 
 ```bash
-pip install nvidia-cublas-cu12 nvidia-cudnn-cu12==9.*
 export LD_LIBRARY_PATH=$(python3 -c \
-  'import os, nvidia.cublas.lib, nvidia.cudnn.lib; \
-   print(os.path.dirname(nvidia.cublas.lib.__file__) + ":" + \
-         os.path.dirname(nvidia.cudnn.lib.__file__))')
+  'import nvidia.cublas.lib as a, nvidia.cudnn.lib as b; \
+   print(f"{a.__path__[0]}:{b.__path__[0]}")'):$LD_LIBRARY_PATH
 ```
 
-`subcheck` auto-selects `cuda` + `float16` when a GPU is present
-(`--device cuda --compute-type int8_float16` are good knobs; `large-v3`
-defaults to the full-precision float16 weights, so ≥ 6 GB VRAM is comfortable,
-12 GB on the 4070 Ti is plenty).
+**Verify GPU acceleration:**
+```bash
+python3 -c "import ctranslate2; print('CUDA available:', ctranslate2.get_cuda_device_count() > 0)"
+```
+
+`subcheck` auto-selects `cuda` + `float16` when a GPU is present (`--device cuda --compute-type int8_float16` are good knobs; `large-v3` defaults to full-precision float16 weights, so ≥ 6 GB VRAM is comfortable, 12 GB on a 4070 Ti is plenty).
+
+### Model Weights & Caching
+
+Whisper model weights are downloaded from Hugging Face on first use into the standard Hugging Face cache directory (`~/.cache/huggingface/hub/`, or `$SUBCHECK_MODEL_DIR` / `$HF_HOME` / `--model-dir`). Silero VAD weights (~2 MB) are also cached automatically.
+
+To avoid waiting for the initial download on first run (especially for the ~3.1 GB `large-v3` model), you can pre-download weights ahead of time:
+
+```bash
+# Pre-download default large-v3 weights:
+subcheck download-model
+
+# Or download a specific model:
+subcheck download-model --model medium
+```
+
+| Model | Weights on Disk | Minimum VRAM (GPU) | Recommended Use Case |
+|---|---|---|---|
+| `large-v3` *(default)* | ~3.1 GB | ≥ 6 GB (float16) / ≥ 4 GB (int8) | Best accuracy across all accents & background noise |
+| `distil-large-v3` | ~1.5 GB | ≥ 4 GB | Faster inference with near-large accuracy |
+| `medium` | ~1.5 GB | ≥ 4 GB | Balanced speed and multi-language accuracy |
+| `small` | ~485 MB | ≥ 2 GB | Fast checks on low-end GPUs or modern CPUs |
+| `base` | ~145 MB | ≥ 1 GB | Very fast verification |
+| `tiny` | ~75 MB | < 1 GB | Instant smoke testing and lightweight checks |
 
 ## Usage
 
