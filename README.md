@@ -60,20 +60,37 @@ means the subtitles run late.
 
 ## System Prerequisites
 
-1. **FFmpeg**: `ffmpeg` and `ffprobe` must be installed and on `PATH`.
-   - Ubuntu / Debian: `sudo apt update && sudo apt install -y ffmpeg`
-   - Arch Linux: `sudo pacman -S ffmpeg`
-   - macOS (Homebrew): `brew install ffmpeg`
-   - Custom / static builds: set `SUBCHECK_FFMPEG_BIN` and `SUBCHECK_FFPROBE_BIN` environment variables.
+1. **Python Environment (Python 3.10 – 3.12 recommended)**:
+   - Python 3.10 to 3.12 is strongly recommended for CTranslate2 / Faster-Whisper wheel and CUDA compatibility.
+   - On Debian/Ubuntu, `python3 -m venv` requires the `python3-venv` package (e.g. `sudo apt install python3-venv` or `python3.12-venv`).
+   - If you do not have root/sudo privileges or if system Python is missing `ensurepip`, use `python3.12 -m venv` or `uv venv`.
 
-2. **NVIDIA Driver (GPU only)**:
+2. **FFmpeg**: `ffmpeg` and `ffprobe` must be installed and on `PATH`.
+   - **With sudo (system-wide)**:
+     - Ubuntu / Debian: `sudo apt update && sudo apt install -y ffmpeg`
+     - Arch Linux: `sudo pacman -S ffmpeg`
+     - macOS (Homebrew): `brew install ffmpeg`
+   - **Without sudo (non-root / portable)**:
+     - Download static binaries directly into `~/.local/bin` in one step:
+       ```bash
+       mkdir -p ~/.local/bin && curl -sL https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz | tar -xJ --strip-components=1 -C ~/.local/bin --wildcards '*/ffmpeg' '*/ffprobe'
+       ```
+     - Or using `subcheck` once installed in your virtual environment:
+       ```bash
+       subcheck download-ffmpeg
+       ```
+   - **Custom builds**: set `SUBCHECK_FFMPEG_BIN` and `SUBCHECK_FFPROBE_BIN` environment variables.
+
+3. **NVIDIA Driver (GPU only)**:
    - For GPU acceleration via CUDA 12, an NVIDIA GPU with driver ≥ 525 (recommended ≥ 550) is required.
    - Verify with: `nvidia-smi`
 
 ## Install
 
 ```bash
-python -m venv .venv && . .venv/bin/activate
+# Create and activate a Python 3.10-3.12 virtual environment:
+python3.12 -m venv .venv && source .venv/bin/activate
+# (or with uv: uv venv --python 3.12 .venv && source .venv/bin/activate)
 
 # Base install (CPU inference):
 pip install -e .

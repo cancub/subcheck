@@ -11,3 +11,9 @@ snippets/
 .env.*
 !.env.example
 .cache/
+*.mkv
+*.mp4
+*.avi
+*.fixed.srt
+*.autosub.srt
+*.json

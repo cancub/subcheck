@@ -115,7 +115,9 @@ def build_parser() -> argparse.ArgumentParser:
             "  subcheck shift movie.srt --scale F --by B\n"
             "      combine both (see 'subcheck shift --help')\n"
             "  subcheck download-model [--model MODEL]\n"
-            "      pre-download Whisper weights ahead of time (see --help)"
+            "      pre-download Whisper weights ahead of time (see --help)\n"
+            "  subcheck download-ffmpeg [--bin-dir DIR]\n"
+            "      download static ffmpeg/ffprobe binaries (see --help)"
         ),
         formatter_class=_RawDefaultsHelpFormatter,
     )
@@ -769,6 +771,35 @@ def run_download_model(args) -> int:
     return 0
 
 
+def build_download_ffmpeg_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="subcheck download-ffmpeg",
+        description=(
+            "Download portable static ffmpeg and ffprobe binaries (no root/sudo required)."
+        ),
+        formatter_class=_RawDefaultsHelpFormatter,
+    )
+    p.add_argument(
+        "--bin-dir",
+        default=None,
+        help="destination directory (default: ~/.local/bin or ~/.cache/subcheck/bin)",
+    )
+    return p
+
+
+def run_download_ffmpeg(args) -> int:
+    from .tools import download_ffmpeg
+
+    target_dir = args.bin_dir
+    print(
+        f"Downloading portable static ffmpeg & ffprobe to {target_dir or '~/.local/bin'}..."
+    )
+    ffmpeg_bin, ffprobe_bin = download_ffmpeg(target_dir)
+    print(f"ffmpeg  ready at: {ffmpeg_bin}")
+    print(f"ffprobe ready at: {ffprobe_bin}")
+    return 0
+
+
 def build_quota_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="subcheck quota",
@@ -857,6 +888,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         args = build_download_model_parser().parse_args(argv[1:])
         try:
             return run_download_model(args)
+        except Exception as exc:  # noqa: BLE001
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+    if argv and argv[0] in ("download-ffmpeg", "pull-ffmpeg"):
+        args = build_download_ffmpeg_parser().parse_args(argv[1:])
+        try:
+            return run_download_ffmpeg(args)
         except Exception as exc:  # noqa: BLE001
             print(f"error: {exc}", file=sys.stderr)
             return 1
