@@ -113,7 +113,9 @@ def build_parser() -> argparse.ArgumentParser:
             "  subcheck shift movie.srt --scale 0.95904\n"
             "      fix 'bad fps' (timebase/fps correction)\n"
             "  subcheck shift movie.srt --scale F --by B\n"
-            "      combine both (see 'subcheck shift --help')"
+            "      combine both (see 'subcheck shift --help')\n"
+            "  subcheck download-model [--model MODEL]\n"
+            "      pre-download Whisper weights ahead of time (see --help)"
         ),
         formatter_class=_RawDefaultsHelpFormatter,
     )
@@ -742,6 +744,31 @@ def print_autosub_report(result) -> None:
                 print(f"      {line.strip()}")
 
 
+def build_download_model_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="subcheck download-model",
+        description=(
+            "Download or verify Whisper model weights ahead of time from Hugging Face."
+        ),
+        formatter_class=_RawDefaultsHelpFormatter,
+    )
+    p.add_argument("--model", default="large-v3",
+                   help="whisper model (tiny/base/small/medium/large-v3 or an HF repo id)")
+    p.add_argument("--model-dir", default=None,
+                   help="directory for model weights (default: HF cache / SUBCHECK_MODEL_DIR)")
+    return p
+
+
+def run_download_model(args) -> int:
+    from .transcribe import download_model, resolve_model_repo
+
+    repo = resolve_model_repo(args.model)
+    print(f"Downloading model {args.model!r} ({repo})...")
+    path = download_model(args.model, download_root=args.model_dir)
+    print(f"Model ready at: {path}")
+    return 0
+
+
 def build_quota_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="subcheck quota",
@@ -826,6 +853,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                 json.dump(result.to_dict(), fh, indent=2, ensure_ascii=False)
             print(f"\nJSON report written to {args.json}")
         return 1 if result.error else 0
+    if argv and argv[0] in ("download-model", "pull-model"):
+        args = build_download_model_parser().parse_args(argv[1:])
+        try:
+            return run_download_model(args)
+        except Exception as exc:  # noqa: BLE001
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
     if argv and argv[0] == "quota":
         args = build_quota_parser().parse_args(argv[1:])
         try:

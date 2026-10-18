@@ -47,6 +47,30 @@ def resolve_model_repo(model: str) -> str:
     )
 
 
+def download_model(
+    model: str = "large-v3",
+    download_root: Optional[str] = None,
+) -> str:
+    """Download or verify model weights ahead of time from Hugging Face.
+
+    Returns the local filesystem snapshot directory containing the weights.
+    """
+    repo = resolve_model_repo(model)
+    target_dir = (
+        download_root
+        or os.environ.get("SUBCHECK_MODEL_DIR")
+        or os.environ.get("HF_HOME")
+    )
+    try:
+        from faster_whisper import download_model as fw_download_model
+
+        return fw_download_model(repo, output_dir=target_dir)
+    except Exception as exc:
+        raise ASRError(
+            f"Failed to download model {model!r} ({repo}): {exc}"
+        ) from exc
+
+
 def _preload_nvidia_libs() -> None:
     """Pre-load pip-installed nvidia libraries (cublas, cudnn) into process memory.
 
@@ -59,6 +83,15 @@ def _preload_nvidia_libs() -> None:
     import site
 
     dirs = []
+    # Check direct module paths first (robust in any virtualenv/pip/conda layout)
+    for mod_name in ("nvidia.cublas.lib", "nvidia.cudnn.lib", "nvidia.cuda_nvrtc.lib"):
+        try:
+            mod = __import__(mod_name, fromlist=["__path__"])
+            if hasattr(mod, "__path__") and mod.__path__:
+                dirs.append(mod.__path__[0])
+        except Exception:
+            pass
+
     try:
         dirs.extend(site.getsitepackages())
     except Exception:
@@ -69,12 +102,16 @@ def _preload_nvidia_libs() -> None:
         pass
 
     for d in dirs:
-        pattern = os.path.join(d, "nvidia", "*", "lib", "*.so*")
-        for so_file in sorted(glob.glob(pattern)):
-            try:
-                ctypes.CDLL(so_file)
-            except Exception:
-                pass
+        patterns = [
+            os.path.join(d, "*.so*"),
+            os.path.join(d, "nvidia", "*", "lib", "*.so*"),
+        ]
+        for pattern in patterns:
+            for so_file in sorted(glob.glob(pattern)):
+                try:
+                    ctypes.CDLL(so_file, mode=ctypes.RTLD_GLOBAL)
+                except Exception:
+                    pass
 
 
 def cuda_device_count() -> int:
