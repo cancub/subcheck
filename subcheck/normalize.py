@@ -39,6 +39,9 @@ _BRACKET_RE = re.compile(
     re.IGNORECASE,
 )
 _MUSIC_GLYPH_RE = re.compile(r"[♪♫♬]")
+_SPEAKER_RE = re.compile(
+    r"(?:^|[\r\n]|\s*-\s*)\s*[A-Z][A-Z0-9 _\x27\.-]{1,20}:"
+)
 
 _NUMBER_TOKEN_RE = re.compile(r"(\d+)(st|nd|rd|th)?")
 
@@ -135,6 +138,7 @@ def normalize(text: str, expand_numbers: bool = True) -> str:
     s = re.sub(r"<[^>]+>|\{[^}]*\}", " ", s)      # formatting tags
     s = _MUSIC_GLYPH_RE.sub(" ", s)
     s = _BRACKET_RE.sub(" ", s)                    # [music], (applause) ...
+    s = _SPEAKER_RE.sub(" ", s)                    # GAIL:, MAN 1:, WAYNE SR.: ...
     s = s.lower()
 
     out_tokens: list[str] = []

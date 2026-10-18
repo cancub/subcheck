@@ -113,3 +113,29 @@ def test_summarize_counts_silent_as_scored():
     assert agg["windows_scored"] == 2
     assert agg["text_accuracy_mean"] == 100.0
     assert agg["composite_mean"] == 100.0
+
+
+def test_windowed_candidate_preserves_in_sync_reading_cues():
+    cue = _cue(1, 10.0, 11.5, "Goodbye, Dad.")
+    # Speech ends at 10.5, but cue stays on screen until 11.5
+    text = windowed_candidate_text([cue], 8.0, 18.0, speech_span=(10.1, 10.5))
+    assert text == "Goodbye, Dad."
+
+
+def test_match_pairs_no_overlapping_words():
+    from subcheck.scoring import _match_pairs
+
+    seg = Segment(10.0, 15.0, "this bitch put that hey i dont play that")
+    cue_near = _cue(1, 10.2, 12.0, "GAIL: Put that... Hey!")
+    cue_far = _cue(2, 22.0, 24.0, "I will put that bedpan in your ass")
+    pairs = _match_pairs([seg], [cue_near, cue_far])
+    assert len(pairs) == 1
+    assert pairs[0][1] == 10.2  # only in-window cue matches; far cue is rejected
+
+
+def test_snippet_score_to_dict_includes_words():
+    seg = Segment(1.0, 2.0, "hello", words=[(1.1, 1.9, "hello")])
+    sc = _win([seg], [_cue(1, 1.0, 2.0, "hello")], wstart=0.0, wend=10.0)
+    d = sc.to_dict()
+    assert d["asr_segments"][0]["words"] == [[1.1, 1.9, "hello"]]
+

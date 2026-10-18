@@ -337,12 +337,25 @@ def load_window_records(windows_json: str):
     with open(windows_json, encoding="utf-8") as fh:
         data = json.load(fh)
     records = []
-    for w in data.get("windows", []):
+    window_list = data.get("shared_windows") or data.get("windows") or []
+    for w in window_list:
+        if w.get("rolled"):
+            continue
         wstart = float(w["start"])
         wend = float(w["end"])
         snip = Snippet(index=len(records), start=wstart, duration=wend - wstart)
         segments = [
-            Segment(float(s["start"]), float(s["end"]), s["text"])
+            Segment(
+                float(s["start"]),
+                float(s["end"]),
+                s["text"],
+                words=[
+                    (float(wrd[0]), float(wrd[1]), str(wrd[2]))
+                    for wrd in s["words"]
+                ]
+                if s.get("words")
+                else None,
+            )
             for s in w.get("asr_segments", [])
         ]
         records.append((snip, segments, w.get("wav", "")))
@@ -463,7 +476,17 @@ class CompareReport:
                     "end": round(snip.end, 3),
                     "wav": wav,
                     "asr_segments": [
-                        {"start": round(s.start, 3), "end": round(s.end, 3), "text": s.text}
+                        {
+                            "start": round(s.start, 3),
+                            "end": round(s.end, 3),
+                            "text": s.text,
+                            "words": [
+                                [round(w[0], 3), round(w[1], 3), w[2]]
+                                for w in s.words
+                            ]
+                            if s.words
+                            else None,
+                        }
                         for s in segs
                     ],
                 }

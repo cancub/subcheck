@@ -203,3 +203,22 @@ def test_single_word_segments_never_pair():
     assert pair_deltas(segs, [_cue(1, 101.0, 104.0, "oh man what happening")]) == []
     segs2 = [_seg(100.0, 102.0, "right yes")]
     assert pair_deltas(segs2, [_cue(1, 101.0, 104.0, "right yes")]) == [1.0]
+
+
+def test_outlier_window_does_not_mask_good_sync():
+    # 9 windows tightly near zero, 1 noisy window
+    deltas = [0.01, -0.02, 0.03, -0.01, 0.02, -0.03, 0.01, 0.02, 0.00, 2.50]
+    ds = summarize_drift(deltas, matched_windows=10)
+    assert ds.category == CATEGORY_GOOD
+    assert abs(ds.mean) < 0.05
+    assert ds.std < 0.10
+
+
+def test_outlier_window_does_not_mask_consistent_drift():
+    # 9 windows at ~+5.0s, 1 noisy window at +11.0s
+    deltas = [5.01, 4.98, 5.02, 5.00, 4.99, 5.03, 4.97, 5.01, 5.00, 11.00]
+    ds = summarize_drift(deltas, matched_windows=10)
+    assert ds.category == CATEGORY_CONSISTENT
+    assert ds.mean == pytest.approx(5.00, abs=0.05)
+    assert ds.fix_by == pytest.approx(-5.00, abs=0.05)
+

@@ -112,6 +112,18 @@ def windowed_candidate_text(
         if n == 0 or cue.duration <= 0:
             continue
         cue_words = cue.text.split()
+
+        # If the cue encompasses speech_span (starts on or before speech,
+        # and ends within normal reading display time of speech_span end),
+        # all words belong to this speech span.
+        if speech_span is not None and cue.start <= lo + 0.15 and cue.end <= hi + 1.2:
+            keep_from = 0
+            step = cue.duration / n
+            while keep_from < n and cue.start + (keep_from + 1) * step <= lo:
+                keep_from += 1
+            words.extend(cue_words[keep_from:])
+            continue
+
         step = cue.duration / n
         keep_from = 0
         keep_to = n
@@ -173,7 +185,17 @@ class SnippetScore:
             "drift_pairs": len(self.drift_deltas),
             "drift_deltas": [round(d, 3) for d in self.drift_deltas],
             "asr_segments": [
-                {"start": round(s.start, 3), "end": round(s.end, 3), "text": s.text}
+                {
+                    "start": round(s.start, 3),
+                    "end": round(s.end, 3),
+                    "text": s.text,
+                    "words": [
+                        [round(w[0], 3), round(w[1], 3), w[2]]
+                        for w in s.words
+                    ]
+                    if s.words
+                    else None,
+                }
                 for s in self.segments
             ],
             "subtitle_cues": [
@@ -321,15 +343,27 @@ def _match_pairs(segments: List[Segment], cues: List[Cue]) -> List[Tuple[float, 
     (or linear word pacing), avoiding bogus multi-second offsets from matching
     a later cue directly against the start of a merged segment.
 
-    A pair is only kept when both sides share at least two matching words.
+    A pair is only kept when both sides share at least two matching words,
+    and distinct cues cannot claim overlapping word ranges of the same segment.
     """
     from difflib import SequenceMatcher
 
     norm_segs = []
     for s in segments:
-        words = normalize(s.text).split()
-        if len(words) >= 2:
-            norm_segs.append((s, words, set(words)))
+        if getattr(s, "words", None):
+            sw = []
+            word_times = []
+            for w_start, w_end, w_text in s.words:
+                norm_toks = normalize(w_text).split()
+                for tok in norm_toks:
+                    sw.append(tok)
+                    word_times.append((w_start, w_end))
+        else:
+            sw = normalize(s.text).split()
+            word_times = None
+        if len(sw) >= 2:
+            norm_segs.append((s, sw, word_times, set(sw)))
+
     if not norm_segs:
         return []
 
@@ -339,53 +373,65 @@ def _match_pairs(segments: List[Segment], cues: List[Cue]) -> List[Tuple[float, 
         if len(c_words) >= 2:
             norm_cues.append((c, c_words, set(c_words)))
 
-    pairs: List[Tuple[float, float]] = []
-    used_cues = set()
+    candidates = []
     for cue, cw, cset in norm_cues:
-        if id(cue) in used_cues:
-            continue
-        best_seg = None
-        best_match = None
-        best_size = 0
-
-        for seg, sw, sset in norm_segs:
-            # temporally near the segment (within 15 s of segment start/end)
+        for seg, sw, word_times, sset in norm_segs:
+            # temporally near the segment (within 15 s)
             if abs(cue.start - seg.start) > 15.0 and not (
                 seg.start - 12.0 <= cue.start <= seg.end + 12.0
             ):
                 continue
-            common = len(cset & sset)
-            if common < 2:
+            if len(cset & sset) < 2:
                 continue
 
             sm = SequenceMatcher(None, sw, cw).find_longest_match(
                 0, len(sw), 0, len(cw)
             )
-            if sm.size >= 2 and sm.size > best_size:
-                best_size = sm.size
-                best_seg = seg
-                best_match = (sm.a, sm.b, sm.size, len(sw), len(cw))
+            if sm.size >= 2:
+                candidates.append((cue, seg, sw, word_times, cw, sm))
 
-        if best_seg is not None and best_match is not None:
-            a, b, size, n_sw, n_cw = best_match
-            if getattr(best_seg, "words", None) and a < len(best_seg.words):
-                time_at_a = best_seg.words[a][0]
-            else:
-                seg_step = best_seg.duration / max(1, n_sw)
-                time_at_a = best_seg.start + a * seg_step
+    # Sort candidates: prefer longer match size, then closer temporal distance
+    candidates.sort(
+        key=lambda item: (-item[5].size, abs(item[0].start - item[1].start))
+    )
 
-            cue_step = (
-                (cue.duration / max(1, n_cw))
-                if (cue.duration > 0 and n_cw > 0)
-                else 0.3
-            )
-            est_cue_start = time_at_a - b * cue_step
-            # clamp to segment bounds with 2.0s leeway
-            est_cue_start = max(
-                best_seg.start - 2.0, min(best_seg.end + 2.0, est_cue_start)
-            )
-            used_cues.add(id(cue))
-            pairs.append((est_cue_start, cue.start))
+    used_cues = set()
+    used_seg_spans = {id(seg): [] for seg, _, _, _ in norm_segs}
+    pairs: List[Tuple[float, float]] = []
+
+    for cue, seg, sw, word_times, cw, sm in candidates:
+        if id(cue) in used_cues:
+            continue
+        a, b, size = sm.a, sm.b, sm.size
+        # Check if words a..a+size in seg overlap any previously claimed span
+        overlap = False
+        for ca, cb in used_seg_spans[id(seg)]:
+            if not (a + size <= ca or a >= cb):
+                overlap = True
+                break
+        if overlap:
+            continue
+
+        used_cues.add(id(cue))
+        used_seg_spans[id(seg)].append((a, a + size))
+
+        if word_times and a < len(word_times):
+            time_at_a = word_times[a][0]
+        else:
+            seg_step = seg.duration / max(1, len(sw))
+            time_at_a = seg.start + a * seg_step
+
+        cue_step = (
+            (cue.duration / max(1, len(cw)))
+            if (cue.duration > 0 and len(cw) > 0)
+            else 0.3
+        )
+        est_cue_start = time_at_a - b * cue_step
+        # clamp to segment bounds with 2.0s leeway
+        est_cue_start = max(
+            seg.start - 2.0, min(seg.end + 2.0, est_cue_start)
+        )
+        pairs.append((est_cue_start, cue.start))
 
     return pairs
 
@@ -510,9 +556,24 @@ def summarize_drift(
         )
     if matched_lines is None:
         matched_lines = n
-    mean = sum(deltas) / n
-    if n > 1:
-        variance = sum((d - mean) ** 2 for d in deltas) / (n - 1)
+
+    eff_deltas = deltas
+    eff_xs = xs
+    if n >= 5:
+        med = _median(deltas)
+        devs = [abs(d - med) for d in deltas]
+        mad = _median(devs)
+        thresh = max(3.0 * 1.4826 * mad, 0.75)
+        inliers_idx = [i for i, d in enumerate(deltas) if abs(d - med) <= thresh]
+        if len(inliers_idx) >= n - 1 and len(inliers_idx) >= 4:
+            eff_deltas = [deltas[i] for i in inliers_idx]
+            if xs is not None and len(xs) == n:
+                eff_xs = [xs[i] for i in inliers_idx]
+
+    m_n = len(eff_deltas)
+    mean = sum(eff_deltas) / m_n
+    if m_n > 1:
+        variance = sum((d - mean) ** 2 for d in eff_deltas) / (m_n - 1)
         std = variance ** 0.5
     else:
         std = 0.0
@@ -524,12 +585,12 @@ def summarize_drift(
     rate_delta_pct: Optional[float] = None
     fit = None
     if (
-        xs is not None
-        and len(xs) == n
-        and n >= 2
-        and max(xs) - min(xs) > 0
+        eff_xs is not None
+        and len(eff_xs) == m_n
+        and m_n >= 2
+        and max(eff_xs) - min(eff_xs) > 0
     ):
-        a, b, sigma_b, _s_res = _ols(xs, deltas)
+        a, b, sigma_b, _s_res = _ols(eff_xs, eff_deltas)
         slope = b
         span = max(xs) - min(xs)
         drift_change = abs(b) * span
