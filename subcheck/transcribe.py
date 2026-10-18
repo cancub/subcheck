@@ -131,6 +131,7 @@ class Segment:
     start: float
     end: float
     text: str
+    words: Optional[List[Tuple[float, float, str]]] = None
 
     @property
     def duration(self) -> float:
@@ -228,8 +229,13 @@ class Transcriber:
                 language=self.language,
                 vad_filter=self.vad_filter,
                 condition_on_previous_text=False,
+                word_timestamps=True,
             )
             segments = list(segments_iter)
+            if self.language is None and getattr(_info, "language", None):
+                prob = getattr(_info, "language_probability", 0.0)
+                if prob >= 0.6:
+                    self.language = _info.language
         except Exception as exc:  # noqa: BLE001 - surface ctranslate2 failures
             raise ASRError(f"ASR failed on {wav_path}: {exc}") from exc
         out = []
@@ -237,5 +243,15 @@ class Transcriber:
             text = (seg.text or "").strip()
             if not text:
                 continue
-            out.append(Segment(float(seg.start), float(seg.end), text))
+            words = None
+            if getattr(seg, "words", None):
+                words = []
+                for w in seg.words:
+                    if not w.word.strip():
+                        continue
+                    # When words are preceded by pause, whisper stretches start time;
+                    # clamp start so it accurately represents word onset
+                    w_start = max(float(w.start), float(w.end) - 0.5) if float(w.end) - float(w.start) > 0.8 else float(w.start)
+                    words.append((w_start, float(w.end), w.word.strip()))
+            out.append(Segment(float(seg.start), float(seg.end), text, words=words))
         return out

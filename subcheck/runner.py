@@ -185,6 +185,17 @@ def run_check(opts: Options) -> CheckReport:
 
     subtitle_path, source_info = _resolve_subtitle_source(opts, workdir)
 
+    if opts.language is None:
+        from .embedded import _ISO_639_MAP
+
+        lang_cand = opts.sub_language or source_info.get("embedded_language")
+        if lang_cand:
+            l = lang_cand.strip().lower()
+            for code2, group in _ISO_639_MAP.items():
+                if l in group:
+                    opts.language = code2
+                    break
+
     report = CheckReport(
         media=media,
         subtitle=media if source_info.get("source") == "embedded" else subtitle_path,
@@ -250,7 +261,17 @@ def run_check(opts: Options) -> CheckReport:
             # stage 4/5: transcribe (local times) then offset to the global timeline
             local_segments = transcriber.transcribe_wav(wav)
             global_segments = [
-                Segment(s.start + snippet.start, s.end + snippet.start, s.text)
+                Segment(
+                    s.start + snippet.start,
+                    s.end + snippet.start,
+                    s.text,
+                    words=[
+                        (w[0] + snippet.start, w[1] + snippet.start, w[2])
+                        for w in s.words
+                    ]
+                    if s.words
+                    else None,
+                )
                 for s in local_segments
             ]
             window_cues = cues_overlapping(cues, snippet.start, snippet.end)
@@ -489,12 +510,31 @@ def _capture_live_windows(media: str, opts: Options):
     records = []
     model_info = {}
     try:
-        for snippet in snippets:
+        queue = list(snippets)
+        rerolls_left = opts.max_rerolls if opts.max_rerolls is not None else 5
+        while queue and len(records) < len(snippets):
+            snippet = queue.pop(0)
             wav = os.path.join(workdir, f"snippet_{snippet.index:02d}.wav")
             extract_audio(media, snippet, wav)
             local_segments = transcriber.transcribe_wav(wav)
+            if not local_segments and rerolls_left > 0:
+                extra = sampler.draw_extra()
+                if extra is not None:
+                    rerolls_left -= 1
+                    queue.append(extra)
+                    continue
             global_segments = [
-                Segment(s.start + snippet.start, s.end + snippet.start, s.text)
+                Segment(
+                    s.start + snippet.start,
+                    s.end + snippet.start,
+                    s.text,
+                    words=[
+                        (w[0] + snippet.start, w[1] + snippet.start, w[2])
+                        for w in s.words
+                    ]
+                    if s.words
+                    else None,
+                )
                 for s in local_segments
             ]
             records.append((snippet, global_segments, wav))

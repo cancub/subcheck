@@ -313,37 +313,80 @@ def pair_deltas(segments: List[Segment], cues: List[Cue]) -> List[float]:
 
 
 def _match_pairs(segments: List[Segment], cues: List[Cue]) -> List[Tuple[float, float]]:
-    """Pair each segment with the nearby cue whose text matches best.
+    """Pair cues with matching speech segments to estimate timing offsets.
 
-    A pair is only kept when both sides share at least two words — one shared
-    filler/interjection word like "the" or "oh" is not enough to claim the
-    subtitle line corresponds to that speech (single-word segments are
-    therefore skipped entirely; they add noise, not timing signal).
+    Matches each cue to its best-matching speech segment. When an ASR segment
+    spans multiple subtitle cues (or when a cue appears inside a long segment),
+    the speech onset for the cue is interpolated based on word timestamps
+    (or linear word pacing), avoiding bogus multi-second offsets from matching
+    a later cue directly against the start of a merged segment.
+
+    A pair is only kept when both sides share at least two matching words.
     """
-    seg_words = []
+    from difflib import SequenceMatcher
+
+    norm_segs = []
     for s in segments:
         words = normalize(s.text).split()
         if len(words) >= 2:
-            seg_words.append((s, set(words)))
-    cue_words = [(c, set(normalize(c.text).split())) for c in cues if normalize(c.text)]
+            norm_segs.append((s, words, set(words)))
+    if not norm_segs:
+        return []
+
+    norm_cues = []
+    for c in cues:
+        c_words = normalize(c.text).split()
+        if len(c_words) >= 2:
+            norm_cues.append((c, c_words, set(c_words)))
+
     pairs: List[Tuple[float, float]] = []
     used_cues = set()
-    for seg, sw in seg_words:
-        best_cue = None
-        best_overlap_words = 0
-        for cue, cw in cue_words:
-            if id(cue) in used_cues:
+    for cue, cw, cset in norm_cues:
+        if id(cue) in used_cues:
+            continue
+        best_seg = None
+        best_match = None
+        best_size = 0
+
+        for seg, sw, sset in norm_segs:
+            # temporally near the segment (within 15 s of segment start/end)
+            if abs(cue.start - seg.start) > 15.0 and not (
+                seg.start - 12.0 <= cue.start <= seg.end + 12.0
+            ):
                 continue
-            # only consider cues temporally near the segment (within 12 s)
-            if abs(cue.start - seg.start) > 12.0:
+            common = len(cset & sset)
+            if common < 2:
                 continue
-            common = len(sw & cw)
-            if common > best_overlap_words:
-                best_overlap_words = common
-                best_cue = cue
-        if best_cue is not None and best_overlap_words >= 2:
-            used_cues.add(id(best_cue))
-            pairs.append((seg.start, best_cue.start))
+
+            sm = SequenceMatcher(None, sw, cw).find_longest_match(
+                0, len(sw), 0, len(cw)
+            )
+            if sm.size >= 2 and sm.size > best_size:
+                best_size = sm.size
+                best_seg = seg
+                best_match = (sm.a, sm.b, sm.size, len(sw), len(cw))
+
+        if best_seg is not None and best_match is not None:
+            a, b, size, n_sw, n_cw = best_match
+            if getattr(best_seg, "words", None) and a < len(best_seg.words):
+                time_at_a = best_seg.words[a][0]
+            else:
+                seg_step = best_seg.duration / max(1, n_sw)
+                time_at_a = best_seg.start + a * seg_step
+
+            cue_step = (
+                (cue.duration / max(1, n_cw))
+                if (cue.duration > 0 and n_cw > 0)
+                else 0.3
+            )
+            est_cue_start = time_at_a - b * cue_step
+            # clamp to segment bounds with 2.0s leeway
+            est_cue_start = max(
+                best_seg.start - 2.0, min(best_seg.end + 2.0, est_cue_start)
+            )
+            used_cues.add(id(cue))
+            pairs.append((est_cue_start, cue.start))
+
     return pairs
 
 

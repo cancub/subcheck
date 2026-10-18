@@ -694,7 +694,12 @@ def print_autosub_report(result) -> None:
             mode = c.best_mode
             if c.best_mode != "as-is" and c.best_by:
                 mode += f" {c.best_by:+.2f}s"
-            mean, std = _mean_std(c.drift_samples)
+            samples = (
+                c.drift_samples_after
+                if (c.best_mode != "as-is" and c.drift_samples_after)
+                else c.drift_samples
+            )
+            mean, std = _mean_std(samples)
             drift = (f"{mean:+.2f}±{std:.2f}s" if mean is not None else "no match")
             print(f"{rank:>4}  {name:<38} {cached:>6} {before:>8} "
                   f"{mode:<9} {after:>8} {drift:>15}")
@@ -725,7 +730,7 @@ def print_autosub_report(result) -> None:
     with_drift = [
         c
         for c in sorted(
-            (c for c in result.candidates if c.rank and c.drift_samples),
+            (c for c in result.candidates if c.rank and (c.drift_samples_after or c.drift_samples)),
             key=lambda c: c.rank,
         )
     ]
@@ -737,12 +742,17 @@ def print_autosub_report(result) -> None:
             name = (c.release or c.file_name) or f"file {c.file_id}"
             if len(name) > 56:
                 name = name[:53] + "..."
-            mean, std = _mean_std(c.drift_samples)
+            samples = (
+                c.drift_samples_after
+                if (c.best_mode != "as-is" and c.drift_samples_after)
+                else c.drift_samples
+            )
+            mean, std = _mean_std(samples)
             stats = (f"mean {mean:+.2f}s, std {std:.2f}s" if mean is not None
                      else "no data")
             mode = f" — chosen fix: {c.best_mode}" if c.best_mode != "as-is" else ""
-            print(f"  #{c.rank} {name} — {stats}, n={len(c.drift_samples)}{mode}")
-            for line in drift_histogram_lines(c.drift_samples):
+            print(f"  #{c.rank} {name} — {stats}, n={len(samples)}{mode}")
+            for line in drift_histogram_lines(samples):
                 print(f"      {line.strip()}")
 
 

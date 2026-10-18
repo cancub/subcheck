@@ -332,6 +332,8 @@ class Candidate:
     drift_samples: List[float] = field(default_factory=list)
     # per-snippet drift of this candidate (median matched offset per window,
     # seconds; + = subtitles run late) — the values behind the histogram
+    drift_after: str = ""
+    drift_samples_after: List[float] = field(default_factory=list)
     stream_index: Optional[int] = None  # stream index if extracted from embedded video track
 
     def to_dict(self) -> dict:
@@ -354,6 +356,8 @@ class Candidate:
                            else round(self.text_after, 2)),
             "rank": self.rank,
             "drift_samples": [round(d, 3) for d in self.drift_samples],
+            "drift_after": self.drift_after,
+            "drift_samples_after": [round(d, 3) for d in self.drift_samples_after],
         }
 
 
@@ -493,20 +497,25 @@ def evaluate_and_pick(
             for o in rep.windows
             if o.score and not o.rolled and o.score.drift_seconds is not None
         ]
-        if ds is None or cand.composite is None:
-            continue
-        if ds.fix_by is None and ds.fix_scale is None:
-            continue
-        # verify the diagnosed fix on a copy: keep it only if it helps
-        label = "timebase" if ds.fix_scale is not None else "shift"
-        variant = os.path.join(variants_dir, f"fixed_{cand.file_id}.srt")
-        try:
-            shift_srt(cand.path, variant, by=ds.fix_by or 0.0,
-                      scale=ds.fix_scale or 1.0)
-            _adopt_if_better(cand, variant, label, ds.fix_by or 0.0,
-                             ds.fix_scale or 1.0, compare, expand_numbers)
-        except Exception:  # noqa: BLE001 - keep as-is on any transform error
-            pass
+        if ds is not None and cand.composite is not None:
+            fix_by = ds.fix_by
+            fix_scale = ds.fix_scale
+            if fix_by is None and fix_scale is None and cand.drift_samples:
+                med = sorted(cand.drift_samples)[len(cand.drift_samples) // 2]
+                if abs(med) >= 0.15:
+                    fix_by = -round(med, 3)
+
+            if fix_by is not None or fix_scale is not None:
+                # verify the diagnosed fix on a copy: keep it only if it helps
+                label = "timebase" if fix_scale is not None else "shift"
+                variant = os.path.join(variants_dir, f"fixed_{cand.file_id}.srt")
+                try:
+                    shift_srt(cand.path, variant, by=fix_by or 0.0,
+                              scale=fix_scale or 1.0)
+                    _adopt_if_better(cand, variant, label, fix_by or 0.0,
+                                     fix_scale or 1.0, compare, expand_numbers)
+                except Exception:  # noqa: BLE001 - keep as-is on any transform error
+                    pass
 
     # Even when the drift classifier is unsure (few windows, borderline
     # fps-vs-constant), scan constant shifts and adopt whichever verifiably
@@ -518,6 +527,7 @@ def evaluate_and_pick(
             continue
         if cand.composite_after is not None and cand.composite_after >= 95.0:
             continue  # already excellent as-is (or after its diagnosed fix)
+        orig_comp = cand.composite_after or 0.0
         for by in grid:
             variant = os.path.join(variants_dir, f"grid_{cand.file_id}_{by:+.1f}.srt")
             try:
@@ -527,10 +537,28 @@ def evaluate_and_pick(
             except Exception:  # noqa: BLE001 - skip broken candidates
                 break
 
-    ranked = sorted(candidates, key=lambda c: (
-        0.0 if c.error else (c.composite_after if c.composite_after is not None
-                             else -1.0)
-    ), reverse=True)
+        # Refine with 0.1s steps around best shift if grid found an improvement
+        if cand.best_by != 0.0 and cand.composite_after and cand.composite_after > orig_comp:
+            fine_grid = [round(cand.best_by + k * 0.1, 2) for k in range(-4, 5) if k != 0]
+            for by in fine_grid:
+                variant = os.path.join(variants_dir, f"fine_{cand.file_id}_{by:+.2f}.srt")
+                try:
+                    shift_srt(cand.path, variant, by=by, scale=1.0)
+                    _adopt_if_better(cand, variant, "shift", by, 1.0,
+                                     compare, expand_numbers)
+                except Exception:
+                    break
+
+    def _rank_key(c: Candidate):
+        if c.error:
+            return -1.0
+        val = c.composite_after if c.composite_after is not None else -1.0
+        # If embedded candidate is competitive (>= 60%), give it preference over re-downloaded
+        if c.stream_index is not None and val >= 60.0:
+            val += 5.0
+        return val
+
+    ranked = sorted(candidates, key=_rank_key, reverse=True)
     for i, cand in enumerate(ranked, start=1):
         if not cand.error and cand.composite_after is not None:
             cand.rank = i
@@ -558,6 +586,13 @@ def _adopt_if_better(cand: Candidate, variant_srt: str, label: str, by: float,
         cand.best_mode = label
         cand.best_by = by
         cand.best_scale = scale
+        cand.drift_samples_after = [
+            o.score.drift_seconds
+            for o in rep2.windows
+            if o.score and not o.rolled and o.score.drift_seconds is not None
+        ]
+        ds2 = rep2.drift_summary
+        cand.drift_after = ds2.label if ds2 else ""
 
 
 # --------------------------------------------------------------------------- #
@@ -719,6 +754,7 @@ def run_autosub(
                 compute_type=compute_type,
                 download_root=download_root,
                 beam_size=beam_size,
+                language=language,
                 expand_numbers=expand_numbers,
             )
             result.windows_count = compare.window_count
@@ -728,7 +764,7 @@ def run_autosub(
                 variants_dir=variants,
                 expand_numbers=expand_numbers,
             )
-            if not refresh and embedded_cand.composite_after is not None and embedded_cand.composite_after >= 65.0:
+            if not refresh and embedded_cand.composite_after is not None and embedded_cand.composite_after >= 60.0:
                 result.candidates = [embedded_cand]
                 result.chosen = embedded_cand
                 mode_desc = (
@@ -750,7 +786,7 @@ def run_autosub(
                     )
                 else:
                     result.notes.append(
-                        f"embedded subtitles low match ({score_str} < 65%), falling back to OpenSubtitles"
+                        f"embedded subtitles low match ({score_str} < 60%), falling back to OpenSubtitles"
                     )
 
             candidates, quota, downloads_new, cache_hits = fetch_candidates(
@@ -811,6 +847,7 @@ def run_autosub(
                     compute_type=compute_type,
                     download_root=download_root,
                     beam_size=beam_size,
+                    language=language,
                     expand_numbers=expand_numbers,
                 )
                 result.windows_count = compare.window_count
