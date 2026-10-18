@@ -51,8 +51,37 @@ _JUNK_TOKENS = {
 }
 
 
+_SEASON_DIR_RE = re.compile(r"(?i)^(season\s*\d+|s\d+|specials|extras)$")
+_GENERIC_DIRS = {
+    "tv", "movies", "media", "downloads", "torrents", "incomplete",
+    "video", "videos", "shows", "series", "films", "data",
+}
+
+
+def _title_from_parents(path: str) -> str:
+    """Derive a show/movie title from parent directory names when the file
+    itself starts with S01E01 (e.g. 'Band of Brothers/S01E02 Day of Days.mkv'
+    or 'Widows Bay/Season 1/S01E01.mkv')."""
+    raw_path = str(path).split("?")[0]
+    parent = os.path.dirname(raw_path)
+    for _ in range(3):
+        if not parent or parent in ("/", "."):
+            break
+        folder = os.path.basename(parent)
+        parent = os.path.dirname(parent)
+        if not folder or folder.lower() in _GENERIC_DIRS:
+            continue
+        if _SEASON_DIR_RE.match(folder.strip()):
+            continue
+        cleaned = _clean_title(folder)
+        if cleaned:
+            return cleaned
+    return ""
+
+
 def parse_video_name(path: str) -> Dict[str, object]:
-    """Best-effort (title, season, episode) from the file name.
+    """Best-effort (title, season, episode) from the file name (falling back
+    to parent directory names when the file starts with SxxExx).
 
     ``Steven.Universe.S01E23.Monster.Buddies.1080p.BluRay...mkv`` ->
     ``{"title": "Steven Universe", "season": 1, "episode": 23,
@@ -64,14 +93,20 @@ def parse_video_name(path: str) -> Dict[str, object]:
     m = _EP_RE.search(stem) or _EP_ALT_RE.search(stem)
     if m:
         season, episode = int(m.group(1)), int(m.group(2))
+        title = _clean_title(stem[: m.start()])
+        if not title:
+            title = _title_from_parents(path)
         return {
-            "title": _clean_title(stem[: m.start()]),
+            "title": title,
             "season": season,
             "episode": episode,
             "episode_of": True,
         }
+    title = _clean_title(stem)
+    if not title:
+        title = _title_from_parents(path)
     return {
-        "title": _clean_title(stem),
+        "title": title,
         "season": None,
         "episode": None,
         "episode_of": False,
@@ -79,7 +114,7 @@ def parse_video_name(path: str) -> Dict[str, object]:
 
 
 def _clean_title(raw: str) -> str:
-    raw = re.sub(r"\[[^\]]*\]|\([^)]*\)", " ", raw)
+    raw = re.sub(r"\{[^}]*\}|\[[^\]]*\]|\([^)]*\)", " ", raw)
     out = []
     for tok in re.split(r"[^0-9A-Za-z']+", raw):
         low = tok.lower()
@@ -644,13 +679,49 @@ class AutoSubResult:
         }
 
 
+def _find_sidecar_srt(video: str, language: str) -> Optional[str]:
+    """Look for an existing sidecar .srt file next to *video* matching *language*."""
+    from .embedded import matches_language
+
+    video_dir = os.path.dirname(os.path.abspath(video))
+    stem = os.path.splitext(os.path.basename(video))[0]
+    if not os.path.isdir(video_dir):
+        return None
+
+    # 1. Explicit language-tagged sidecar: <stem>.<lang>.srt
+    try:
+        entries = sorted(os.listdir(video_dir))
+    except OSError:
+        return None
+
+    prefix = stem.lower() + "."
+    for name in entries:
+        low = name.lower()
+        if not low.endswith(".srt") or not low.startswith(prefix):
+            continue
+        if low.endswith((".autosub.srt", ".fixed.srt")):
+            continue
+        middle = name[len(stem) + 1 : -4].strip(".")
+        if middle and matches_language(middle, language):
+            cand_path = os.path.join(video_dir, name)
+            if os.path.isfile(cand_path) and os.path.getsize(cand_path) > 0:
+                return cand_path
+
+    # 2. Untagged <stem>.srt (treated as candidate when searching for English or default)
+    exact = os.path.join(video_dir, stem + ".srt")
+    if os.path.isfile(exact) and os.path.getsize(exact) > 0:
+        if matches_language("en", language):
+            return exact
+    return None
+
+
 def extract_embedded_candidate(
     video: str,
     language: str,
     workdir: str,
 ) -> Optional[Candidate]:
-    """If *video* has an embedded text subtitle track matching *language*,
-    extract it to *workdir* and return a Candidate."""
+    """If *video* has an embedded text subtitle track matching *language*
+    (or a sidecar .srt next to it), extract/copy it to *workdir* and return a Candidate."""
     if video.startswith(("http://", "https://")) or not os.path.isfile(video):
         return None
     try:
@@ -661,22 +732,39 @@ def extract_embedded_candidate(
         )
 
         streams = probe_subtitle_streams(video)
-        if not streams:
-            return None
-        stream = select_subtitle_stream(streams, language=language)
-        out_path = os.path.join(workdir, f"embedded_{stream.index}.srt")
-        extract_subtitle_stream(video, stream, out_path)
-        lang_tag = f", {stream.language}" if stream.language else ""
-        return Candidate(
-            file_id=0,
-            release=f"embedded stream #{stream.index} ({stream.codec}{lang_tag})",
-            file_name=os.path.basename(out_path),
-            path=out_path,
-            from_cache=True,
-            stream_index=stream.index,
-        )
+        if streams:
+            stream = select_subtitle_stream(streams, language=language)
+            out_path = os.path.join(workdir, f"embedded_{stream.index}.srt")
+            extract_subtitle_stream(video, stream, out_path)
+            lang_tag = f", {stream.language}" if stream.language else ""
+            return Candidate(
+                file_id=0,
+                release=f"embedded stream #{stream.index} ({stream.codec}{lang_tag})",
+                file_name=os.path.basename(out_path),
+                path=out_path,
+                from_cache=True,
+                stream_index=stream.index,
+            )
     except Exception:
-        return None
+        pass
+
+    sidecar = _find_sidecar_srt(video, language)
+    if sidecar:
+        try:
+            out_path = os.path.join(workdir, "sidecar_0.srt")
+            shutil.copyfile(sidecar, out_path)
+            if _decodes(Path(out_path).read_bytes()):
+                return Candidate(
+                    file_id=0,
+                    release=f"sidecar ({os.path.basename(sidecar)})",
+                    file_name=os.path.basename(sidecar),
+                    path=out_path,
+                    from_cache=True,
+                    stream_index=None,
+                )
+        except Exception:
+            pass
+    return None
 
 
 def run_autosub(
@@ -772,8 +860,13 @@ def run_autosub(
                     if embedded_cand.best_mode != "as-is"
                     else "as-is"
                 )
+                src_label = (
+                    "sidecar subtitle file"
+                    if embedded_cand.release.startswith("sidecar")
+                    else "embedded subtitle stream"
+                )
                 result.notes.append(
-                    f"using embedded subtitle stream (score: {embedded_cand.composite_after:.1f}% {mode_desc}) — skipped OpenSubtitles search"
+                    f"using {src_label} (score: {embedded_cand.composite_after:.1f}% {mode_desc}) — skipped OpenSubtitles search"
                 )
                 chosen = embedded_cand
 
@@ -863,7 +956,10 @@ def run_autosub(
                 result.error = "none of the candidates could be scored"
                 return result
 
-        is_embedded = (chosen.file_id == 0)
+        is_embedded = (
+            chosen.file_id == 0
+            and not chosen.release.startswith("sidecar")
+        )
         is_as_is = (
             chosen.best_mode == "as-is"
             and round(chosen.best_by, 3) == 0.0
@@ -904,27 +1000,12 @@ def run_autosub(
                 )
             return result
 
-        # persist the winner (with its fix applied) as <video-stem>.autosub.srt
         source_path = chosen.path
         if chosen.best_mode != "as-is":
             fixed = os.path.join(variants, "best_fixed.srt")
             shift_srt(chosen.path, fixed, by=chosen.best_by,
                       scale=chosen.best_scale)
             source_path = fixed
-        if final_srt is None:
-            dest_dir = os.path.dirname(os.path.abspath(video))
-            if not os.path.isdir(dest_dir):
-                dest_dir = os.getcwd()
-            stem = os.path.splitext(os.path.basename(video.split("?")[0]))[0]
-            final_srt = os.path.join(dest_dir, stem + ".autosub.srt")
-        try:
-            os.makedirs(os.path.dirname(os.path.abspath(final_srt)),
-                        exist_ok=True)
-            shutil.copyfile(source_path, final_srt)
-        except OSError as exc:
-            result.error = f"could not write final subtitles: {exc}"
-            return result
-        result.final_srt = final_srt
 
         if embed:
             replace_idx = (
@@ -933,12 +1014,32 @@ def run_autosub(
                 else (embedded_cand.stream_index if embedded_cand else None)
             )
             result.embed_out, result.embed_status = _embed(
-                video, final_srt, language, embed_out,
+                video, source_path, language, embed_out,
                 overwrite=overwrite,
                 replace_stream_index=replace_idx,
             )
         else:
             result.embed_status = "skipped"
+
+        # When overwriting in-place and embedding succeeded without an explicit
+        # --out-srt, do not leave a duplicate .autosub.srt sidecar next to the video.
+        if overwrite and embed and result.embed_status == "ok" and not final_srt_explicit:
+            result.final_srt = ""
+        else:
+            if final_srt is None:
+                dest_dir = os.path.dirname(os.path.abspath(video))
+                if not os.path.isdir(dest_dir):
+                    dest_dir = os.getcwd()
+                stem = os.path.splitext(os.path.basename(video.split("?")[0]))[0]
+                final_srt = os.path.join(dest_dir, stem + ".autosub.srt")
+            try:
+                os.makedirs(os.path.dirname(os.path.abspath(final_srt)),
+                            exist_ok=True)
+                shutil.copyfile(source_path, final_srt)
+            except OSError as exc:
+                result.error = f"could not write final subtitles: {exc}"
+                return result
+            result.final_srt = final_srt
         return result
     finally:
         if cleanup and os.path.isdir(cleanup):

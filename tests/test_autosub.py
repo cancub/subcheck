@@ -487,4 +487,78 @@ def test_autosub_refresh_searches_opensubtitles_even_if_embedded_good(tmp_path, 
     assert any("--refresh requested" in note for note in res.notes)
 
 
+def test_parse_video_name_parent_folder_fallback():
+    # Filename starts directly with S01E02 -> falls back to parent directory "Band of Brothers"
+    m = parse_video_name("/data/media/tv/Band of Brothers/S01E02 Day of Days.mkv")
+    assert m["title"] == "Band of Brothers"
+    assert m["season"] == 1 and m["episode"] == 2 and m["episode_of"] is True
 
+    # Filename inside a "Season 1" directory -> skips "Season 1" and uses grandparent "Widow's Bay"
+    m2 = parse_video_name("/data/media/tv/Widow's Bay/Season 1/S01E05 What to Expect.mkv")
+    assert m2["title"] == "Widow's Bay"
+    assert m2["season"] == 1 and m2["episode"] == 5 and m2["episode_of"] is True
+
+
+def test_extract_embedded_candidate_sidecar_fallback(tmp_path, monkeypatch):
+    from subcheck.autosub import extract_embedded_candidate
+
+    # MP4 with no embedded streams, but a sidecar .srt next to it
+    video = tmp_path / "Seven.Up.1964.1080p.mp4"
+    video.write_bytes(b"dummy")
+    sidecar = tmp_path / "Seven.Up.1964.1080p.srt"
+    sidecar.write_text(SRT_A, encoding="utf-8")
+
+    monkeypatch.setattr("subcheck.embedded.probe_subtitle_streams", lambda v: [])
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+
+    cand = extract_embedded_candidate(str(video), "en", str(workdir))
+    assert cand is not None
+    assert cand.file_id == 0
+    assert cand.stream_index is None
+    assert "sidecar" in cand.release
+    assert os.path.isfile(cand.path)
+
+
+def test_autosub_in_place_does_not_leave_duplicate_sidecar(tmp_path, monkeypatch):
+    video = tmp_path / "Movie.2024.mkv"
+    video.write_bytes(b"dummy")
+
+    os_srt = tmp_path / "os.srt"
+    os_srt.write_text(SRT_A, encoding="utf-8")
+    os_cand = Candidate(
+        file_id=999,
+        release="OpenSubtitles Release",
+        file_name="os.srt",
+        path=str(os_srt),
+        from_cache=True,
+    )
+
+    monkeypatch.setattr("subcheck.autosub.extract_embedded_candidate", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "subcheck.autosub.fetch_candidates",
+        lambda *args, **kwargs: ([os_cand], None, 0, 1),
+    )
+
+    from subcheck.runner import CompareReport
+
+    monkeypatch.setattr(
+        "subcheck.autosub.run_compare",
+        lambda *args, **kwargs: CompareReport(mode="live", records=[None] * 2, media=str(video)),
+    )
+
+    def fake_eval(compare, candidates, **kwargs):
+        candidates[0].composite = 92.0
+        candidates[0].composite_after = 92.0
+        candidates[0].rank = 1
+        return candidates[0]
+
+    monkeypatch.setattr("subcheck.autosub.evaluate_and_pick", fake_eval)
+    monkeypatch.setattr("subcheck.autosub._embed", lambda *args, **kwargs: (str(video), "ok"))
+
+    res = run_autosub(str(video), overwrite=True, workdir=str(tmp_path / "work"))
+    assert res.error == ""
+    assert res.embed_status == "ok"
+    assert res.embed_out == str(video)
+    assert res.final_srt == ""
+    assert not (tmp_path / "Movie.2024.autosub.srt").exists()
