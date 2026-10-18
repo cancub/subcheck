@@ -117,7 +117,9 @@ def build_parser() -> argparse.ArgumentParser:
             "  subcheck download-model [--model MODEL]\n"
             "      pre-download Whisper weights ahead of time (see --help)\n"
             "  subcheck download-ffmpeg [--bin-dir DIR]\n"
-            "      download static ffmpeg/ffprobe binaries (see --help)"
+            "      download static ffmpeg/ffprobe binaries (see --help)\n"
+            "  subcheck serve [--port 8765]\n"
+            "      start the *arr / Jellyfin webhook daemon & web UI (see --help)"
         ),
         formatter_class=_RawDefaultsHelpFormatter,
     )
@@ -877,10 +879,206 @@ def run_streams(args) -> int:
     return 0
 
 
+def build_serve_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="subcheck serve",
+        description=(
+            "Start the HTTP webhook server, sequential GPU worker queue, and "
+            "Web UI for Sonarr, Radarr, and Jellyfin integration.\n\n"
+            "Endpoints:\n"
+            "  GET  /                  Web dashboard & manual trigger UI\n"
+            "  GET  /healthz           Health check\n"
+            "  GET  /api/status        Queue, active job, history, and quota JSON\n"
+            "  POST /webhook/sonarr    Sonarr On Import / On Upgrade webhook\n"
+            "  POST /webhook/radarr    Radarr On Import / On Upgrade webhook\n"
+            "  POST /webhook/jellyfin  Jellyfin ItemAdded webhook\n"
+            "  POST /api/autosub       Trigger autosub on a file or directory"
+        ),
+        formatter_class=_RawDefaultsHelpFormatter,
+    )
+    p.add_argument(
+        "--host",
+        default=os.environ.get("SUBCHECK_HOST", "0.0.0.0"),
+        help="bind address (env: SUBCHECK_HOST)",
+    )
+    p.add_argument(
+        "--port",
+        type=int,
+        default=int(os.environ.get("SUBCHECK_PORT", "8765")),
+        help="listen port (env: SUBCHECK_PORT)",
+    )
+    p.add_argument(
+        "--language",
+        default=os.environ.get("SUBCHECK_LANGUAGE", "en"),
+        help="default subtitle language code (env: SUBCHECK_LANGUAGE)",
+    )
+    p.add_argument(
+        "--limit",
+        type=int,
+        default=int(os.environ.get("SUBCHECK_LIMIT", "3")),
+        help="max OpenSubtitles candidates to compare (env: SUBCHECK_LIMIT)",
+    )
+    p.add_argument(
+        "--snippets",
+        type=int,
+        default=int(os.environ.get("SUBCHECK_SNIPPETS", "10")),
+        help="number of audio windows per check (env: SUBCHECK_SNIPPETS)",
+    )
+    p.add_argument(
+        "--duration",
+        type=float,
+        default=float(os.environ.get("SUBCHECK_DURATION", "10.0")),
+        help="window duration in seconds (env: SUBCHECK_DURATION)",
+    )
+    p.add_argument(
+        "--min-gap",
+        type=float,
+        default=float(os.environ.get("SUBCHECK_MIN_GAP", "30.0")),
+        help="minimum gap between windows in seconds (env: SUBCHECK_MIN_GAP)",
+    )
+    p.add_argument(
+        "--model",
+        default=os.environ.get("SUBCHECK_MODEL", "large-v3"),
+        help="whisper model (env: SUBCHECK_MODEL)",
+    )
+    p.add_argument(
+        "--device",
+        choices=["auto", "cpu", "cuda"],
+        default=os.environ.get("SUBCHECK_DEVICE", "auto"),
+        help="compute device (env: SUBCHECK_DEVICE)",
+    )
+    p.add_argument(
+        "--compute-type",
+        default=os.environ.get("SUBCHECK_COMPUTE_TYPE") or None,
+        help="ctranslate2 compute type (env: SUBCHECK_COMPUTE_TYPE)",
+    )
+    p.add_argument(
+        "--model-dir",
+        default=os.environ.get("SUBCHECK_MODEL_DIR") or None,
+        help="directory for model weights (env: SUBCHECK_MODEL_DIR)",
+    )
+    p.add_argument(
+        "--beam-size",
+        type=int,
+        default=int(os.environ.get("SUBCHECK_BEAM_SIZE", "5")),
+        help="whisper beam size (env: SUBCHECK_BEAM_SIZE)",
+    )
+    p.add_argument(
+        "--no-in-place",
+        action="store_true",
+        help="write <video>.autosub.<ext> copies instead of updating video files in place",
+    )
+    p.add_argument(
+        "--path-map",
+        default=os.environ.get("SUBCHECK_PATH_MAP", ""),
+        help="comma-separated FROM:TO path mappings for incoming webhooks (env: SUBCHECK_PATH_MAP)",
+    )
+    p.add_argument(
+        "--jellyfin-url",
+        default=os.environ.get("JELLYFIN_URL", ""),
+        help="Jellyfin base URL for post-remux library refresh (env: JELLYFIN_URL)",
+    )
+    p.add_argument(
+        "--jellyfin-api-key",
+        default=os.environ.get("JELLYFIN_API_KEY", ""),
+        help="Jellyfin API token (env: JELLYFIN_API_KEY)",
+    )
+    p.add_argument(
+        "--jellyfin-path-map",
+        default=os.environ.get("JELLYFIN_PATH_MAP", ""),
+        help="comma-separated FROM:TO path mappings when notifying Jellyfin (env: JELLYFIN_PATH_MAP)",
+    )
+    p.add_argument(
+        "--sonarr-url",
+        default=os.environ.get("SONARR_URL", ""),
+        help="Sonarr base URL for webhook auto-registration (env: SONARR_URL)",
+    )
+    p.add_argument(
+        "--sonarr-api-key",
+        default=os.environ.get("SONARR_API_KEY", ""),
+        help="Sonarr API key (env: SONARR_API_KEY)",
+    )
+    p.add_argument(
+        "--radarr-url",
+        default=os.environ.get("RADARR_URL", ""),
+        help="Radarr base URL for webhook auto-registration (env: RADARR_URL)",
+    )
+    p.add_argument(
+        "--radarr-api-key",
+        default=os.environ.get("RADARR_API_KEY", ""),
+        help="Radarr API key (env: RADARR_API_KEY)",
+    )
+    p.add_argument(
+        "--self-url",
+        default=os.environ.get(
+            "SUBCHECK_SELF_URL", "http://subcheck.media-stack.svc.cluster.local:8765"
+        ),
+        help="URL that Sonarr/Radarr should call for webhooks (env: SUBCHECK_SELF_URL)",
+    )
+    p.add_argument(
+        "--auto-register",
+        action="store_true",
+        default=os.environ.get("SUBCHECK_AUTO_REGISTER", "").lower()
+        in ("1", "true", "yes"),
+        help="automatically register Subcheck webhooks in Sonarr/Radarr on startup (env: SUBCHECK_AUTO_REGISTER=1)",
+    )
+    p.add_argument(
+        "--history-file",
+        default=os.environ.get("SUBCHECK_HISTORY_FILE") or None,
+        help="path to JSON file for persisting job history (env: SUBCHECK_HISTORY_FILE)",
+    )
+    p.add_argument(
+        "--browse-root",
+        default=os.environ.get("SUBCHECK_BROWSE_ROOT", "/data/media"),
+        help="default root path for the Web UI file browser (env: SUBCHECK_BROWSE_ROOT)",
+    )
+    return p
+
+
+def run_serve_cli(args) -> int:
+    from .server import ServerConfig, parse_path_maps, run_server
+
+    cfg = ServerConfig(
+        host=args.host,
+        port=args.port,
+        language=args.language,
+        limit=args.limit,
+        snippets=args.snippets,
+        duration=args.duration,
+        min_gap=args.min_gap,
+        model=args.model,
+        device=args.device,
+        compute_type=args.compute_type,
+        model_dir=args.model_dir,
+        beam_size=args.beam_size,
+        in_place=not args.no_in_place,
+        path_maps=parse_path_maps(args.path_map),
+        jellyfin_url=args.jellyfin_url,
+        jellyfin_api_key=args.jellyfin_api_key,
+        jellyfin_path_maps=parse_path_maps(args.jellyfin_path_map),
+        sonarr_url=args.sonarr_url,
+        sonarr_api_key=args.sonarr_api_key,
+        radarr_url=args.radarr_url,
+        radarr_api_key=args.radarr_api_key,
+        self_url=args.self_url,
+        auto_register=args.auto_register,
+        history_file=args.history_file,
+        browse_root=args.browse_root,
+    )
+    return run_server(cfg)
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "check":  # `subcheck check VIDEO [SRT]` is the default
         argv = argv[1:]
+    if argv and argv[0] in ("serve", "server", "daemon"):
+        args = build_serve_parser().parse_args(argv[1:])
+        try:
+            return run_serve_cli(args)
+        except Exception as exc:  # noqa: BLE001
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
     if argv and argv[0] == "autosub":
         args = build_autosub_parser().parse_args(argv[1:])
         try:

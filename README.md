@@ -394,6 +394,29 @@ clear message — provide an external `.srt` instead.
   ```
 
 
+### Media Stack Integration (`subcheck serve` — Sonarr / Radarr / Jellyfin)
+
+`subcheck serve` runs a lightweight HTTP webhook server, sequential GPU worker
+queue, and single-page Web UI (default port `8765`) designed for `*arr` +
+Jellyfin/Plex media stacks:
+
+```bash
+subcheck serve --port 8765 --auto-register \
+  --sonarr-url http://sonarr:8989 --sonarr-api-key "$SONARR_API_KEY" \
+  --radarr-url http://radarr:7878 --radarr-api-key "$RADARR_API_KEY" \
+  --jellyfin-url http://jellyfin:8096 --jellyfin-api-key "$JELLYFIN_API_KEY"
+```
+
+* **Endpoints**:
+  * `GET /`: Dark-mode Web UI with live worker status, job history, file/folder browser, and manual queue trigger.
+  * `POST /webhook/sonarr` & `POST /webhook/radarr`: Receives `On Import` / `On Upgrade` (`Download`) webhooks (including multi-episode season packs) and queues `autosub --in-place` on the imported library file.
+  * `POST /webhook/jellyfin`: Receives Jellyfin `ItemAdded` webhooks.
+  * `POST /api/autosub`: Queue any file or directory path via JSON (`{"video": "/data/media/..."}`).
+  * `GET /healthz` & `GET /api/status`: Health check and JSON status snapshot.
+* **Torrent seeding safe**: Because `remux_with_subtitles` writes to a temporary file and uses `os.replace()` on the imported library path, any hardlinked source file in the torrent client's seeding directory keeps its original inode and SHA1 hash untouched. When embedded subtitles are already in sync, no remux occurs and the hardlink itself is preserved.
+* **Auto-wiring & Jellyfin refresh**: With `--auto-register` (`SUBCHECK_AUTO_REGISTER=1`), `subcheck serve` automatically registers its webhook in Sonarr and Radarr on startup, and notifies Jellyfin (`POST /Library/Media/Updated`) as soon as a file is updated.
+
+
 ## Interpreting the output
 
 Per window: `text` accuracy, temporal `iou`, composite `score`, optional
@@ -433,6 +456,9 @@ subcheck/            the package
   srtio.py           SRT parsing/windowing (pysrt)
   normalize.py       shared text normalisation
   scoring.py         WER / IoU / composite / drift estimation
+  embedded.py        embedded subtitle stream discovery, extraction & remuxing
+  autosub.py         end-to-end OpenSubtitles + embedded verification & fix
+  server.py          HTTP webhook daemon, GPU job queue & Web UI (subcheck serve)
   runner.py          orchestration + report building
   cli.py             CLI
 tests/               unit tests (pytest)
