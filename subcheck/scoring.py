@@ -565,7 +565,8 @@ def summarize_drift(
         mad = _median(devs)
         thresh = max(3.0 * 1.4826 * mad, 0.75)
         inliers_idx = [i for i, d in enumerate(deltas) if abs(d - med) <= thresh]
-        if len(inliers_idx) >= n - 1 and len(inliers_idx) >= 4:
+        min_inliers = max(4, n - 2 if n >= 7 else n - 1)
+        if len(inliers_idx) >= min_inliers:
             eff_deltas = [deltas[i] for i in inliers_idx]
             if xs is not None and len(xs) == n:
                 eff_xs = [xs[i] for i in inliers_idx]
